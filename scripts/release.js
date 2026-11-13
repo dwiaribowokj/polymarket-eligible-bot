@@ -7,9 +7,10 @@ import { execFileSync } from 'node:child_process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const ROOT_FILES = new Set(['.env.example', '.gitignore', '.nvmrc', 'README.md', 'SECURITY.md',
+const ROOT_FILES = new Set(['.env.example', '.gitignore', '.nvmrc', 'README.md', 'SECURITY.md', 'AGENTS.md',
     'package.json', 'package-lock.json', 'LICENSE', 'LICENSE.md', 'NOTICE', 'CONTRIBUTING.md']);
 const PUBLIC_DOCS = new Set(['docs/setup.md', 'docs/reference.md']);
+const PRIVATE_FILE_KEYS = new Set(['POLYMARKET_ENV_FILE', 'ELIGIBLE_LIVE_CONFIG']);
 
 export function privatePath(file) {
     const parts = file.replaceAll('\\', '/').split('/');
@@ -46,6 +47,7 @@ function placeholder(value) {
 
 export function scanContent(file, bytes, knownPrivate = []) {
     const content = bytes.toString('utf8'), findings = [];
+    const addresses = knownPrivate.filter(value => /^0x[a-f0-9]{40}$/i.test(value)).map(value => value.toLowerCase());
     const add = (line, type) => {
         if (!findings.some(f => f.line === line && f.type === type)) findings.push({ file, line, type });
     };
@@ -55,7 +57,7 @@ export function scanContent(file, bytes, knownPrivate = []) {
         if (/-----BEGIN (?:[A-Z]+ )?PRIVATE KEY-----/.test(line)) add(index + 1, 'private_key');
         if (/(?:ghp_|github_pat_|glpat-|sk-proj-|sk-svcacct-|xox[baprs]-)[A-Za-z0-9_-]{20,}/.test(line)) add(index + 1, 'api_token');
         if (/(?:PRIVATE_KEY|privateKey|private_key)["'\s]*[:=]\s*["']?(?:0x)?[a-f0-9]{64}\b/i.test(line)) add(index + 1, 'private_key');
-        const assignment = line.match(/^\s*(?:export\s+)?(?:PRIVATE_KEY|PROXY_WALLET_ADDRESS|CLOB_API_(?:KEY|SECRET|PASSPHRASE)|NINEROUTER_KEY|[A-Z_]*(?:PASSWORD|API_SECRET))\s*=\s*["']?([^\s#"']+)/);
+        const assignment = line.match(/^\s*(?:export\s+)?(?:PRIVATE_KEY|[A-Z_]*WALLET_ADDRESS|LAYA_PROFIT_RECIPIENT|CLOB_API_(?:KEY|SECRET|PASSPHRASE)|NINEROUTER_KEY|[A-Z_]*(?:PASSWORD|API_SECRET))\s*=\s*["']?([^\s#"']+)/);
         if (assignment && !placeholder(assignment[1])) add(index + 1, 'private_configuration');
         for (const raw of line.match(/https?:\/\/[^\s"'`<>]+/g) || []) {
             try {
@@ -67,28 +69,57 @@ export function scanContent(file, bytes, knownPrivate = []) {
                         && value.length >= 8 && !placeholder(value) && !example) add(index + 1, 'url_token');
             } catch { /* Ignore source-code URL expressions. */ }
         }
-        if (knownPrivate.some(value => line.includes(value))) add(index + 1, 'local_private_value');
+        if (knownPrivate.some(value => line.includes(value))
+            || addresses.some(value => line.toLowerCase().includes(value))) add(index + 1, 'local_private_value');
     });
     return findings;
 }
 
 export function localPrivateValues(files) {
-    const values = new Set();
-    for (const file of files) {
-        if (!fs.existsSync(file)) continue;
-        for (const line of fs.readFileSync(file, 'utf8').split('\n')) {
+    const values = new Set(), visited = new Set();
+    const pending = files.map(file => ({ file, optional: true }));
+    for (let index = 0; index < pending.length; index++) {
+        const { file, optional } = pending[index];
+        let resolved, content, fd;
+        try {
+            resolved = fs.realpathSync(file);
+            if (visited.has(resolved)) continue;
+            visited.add(resolved);
+            // Follow private config symlinks, but never block on pipes or read devices.
+            fd = fs.openSync(resolved, fs.constants.O_RDONLY | fs.constants.O_NONBLOCK);
+            if (!fs.fstatSync(fd).isFile()) throw new Error('not_regular_file');
+            content = fs.readFileSync(fd, 'utf8');
+        } catch (error) {
+            if (optional && error.code === 'ENOENT') continue;
+            throw new Error('private_configuration_unreadable');
+        } finally {
+            if (fd !== undefined) fs.closeSync(fd);
+        }
+        for (const line of content.split('\n')) {
             const match = line.match(/^\s*(?:export\s+)?([A-Z_0-9]+)\s*=\s*(.*?)\s*$/);
             if (!match) continue;
             const name = match[1];
             let value = match[2];
-            if (/^["']/.test(value)) value = value.slice(1, value.lastIndexOf(value[0]));
-            else value = value.split(/\s+#/)[0];
-            const sensitive = /PRIVATE_KEY|WALLET_ADDRESS|API_KEY|API_SECRET|PASSPHRASE|PASSWORD|NINEROUTER_KEY/.test(name)
+            if (/^["'`]/.test(value)) {
+                const end = value.indexOf(value[0], 1);
+                if (end < 0) throw new Error('private_configuration_unreadable');
+                value = value.slice(1, end);
+            } else value = value.split('#')[0].trim();
+            // Paths are literal config values; never evaluate shell interpolation.
+            if (PRIVATE_FILE_KEYS.has(name) && value)
+                pending.push({ file: path.resolve(path.dirname(resolved), value), optional: false });
+            const sensitive = /PRIVATE_KEY|WALLET_ADDRESS|LAYA_PROFIT_RECIPIENT|API_KEY|API_SECRET|PASSPHRASE|PASSWORD|NINEROUTER_KEY/.test(name)
                 || /RPC.*URL/.test(name) && /(?:@|\?|\/v[23]\/)/.test(value);
             if (sensitive && value.length >= 8 && !placeholder(value)) values.add(value);
         }
     }
     return [...values];
+}
+
+export function defaultPrivateFiles(root = ROOT, { home = os.homedir(), env = process.env } = {}) {
+    return [path.join(root, '.env'), path.join(home, '.config/polymarket-eligible-live.env'),
+        path.join(home, '.config/polymarket-ai-shadow.env'),
+        ...[...PRIVATE_FILE_KEYS].map(key => env[key]).filter(Boolean)];
 }
 
 // The running deployment binds these original bytes to its period identity.
@@ -138,8 +169,7 @@ function readWorkingFile(root, file) {
     return { file, bytes: fs.readFileSync(location), mode: stat.mode & 0o111 ? 0o755 : 0o644 };
 }
 
-export function inspectRelease(root = ROOT, { staged = false, privateFiles = [path.join(root, '.env'),
-    path.join(os.homedir(), '.config/polymarket-ai-shadow.env')] } = {}) {
+export function inspectRelease(root = ROOT, { staged = false, privateFiles = defaultPrivateFiles(root) } = {}) {
     let names;
     try {
         // Require the exact Git root: a directory nested in another repo must not

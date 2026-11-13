@@ -30,6 +30,19 @@ menginisialisasi Git, membuat commit, maupun push. Hook memeriksa isi **index**,
 bukan hanya versi file pada disk; hook lokal tetap dapat dilewati. Pemeriksaan
 pola bukan jaminan mendeteksi seluruh format rahasia: tinjau berkas sebelum push.
 
+Pemindai membaca nilai privat dari `.env`, kedua konfigurasi privat di atas, dan
+file yang dirujuk melalui `POLYMARKET_ENV_FILE` atau `ELIGIBLE_LIVE_CONFIG`.
+Referensi ditelusuri tanpa mengeksekusi shell dan dengan perlindungan siklus.
+Alamat wallet serta `LAYA_PROFIT_RECIPIENT` dibandingkan tanpa membedakan huruf
+besar/kecil. Nilai rahasia tidak dicetak; file rujukan yang tidak dapat dibaca
+menggagalkan pemeriksaan. Berkas privat tetap berada di perangkat lokal.
+
+Untuk pembaruan repo publik, jalankan `npm run release:check`, stage hanya
+perubahan publik, lalu jalankan `node scripts/release.js check --staged` dan
+tinjau diff sebelum commit/push. Tujuan push proyek ini adalah
+`https://github.com/dwiaribowokj/polymarket-eligible-bot`.
+Jangan menggabungkan riwayat Git deployment privat ke repo publik.
+
 Ekspor juga mengganti default path perangkat pada dua template service, wrapper
 Node lama, dan default database router dengan nilai portable. Sumber deployment
 yang sedang berjalan tetap dipertahankan. Kode ekspor memiliki identitas sumber
