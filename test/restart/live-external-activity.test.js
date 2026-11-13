@@ -6,6 +6,10 @@ import path from 'node:path';
 import { Store } from '../../src/restart/store.js';
 import { CONTRACTS } from '../../src/restart/client.js';
 import { OperationalError } from '../../src/restart/network.js';
+import { newPosition } from '../../src/restart/strategy.js';
+import { LayaLiveBroker } from '../../src/laya-live/broker.js';
+import { MaintenanceEngine } from '../../src/laya-live/maintenance.js';
+import { captureLossWalletEvidence, lossProtectionActivationId } from '../../src/laya-live/loss-evidence.js';
 import { ExternalActivityReconciler, externalActivityCandidate, externalTokenBalances }
     from '../../src/laya-live/external-activity.js';
 import { expectedWalletBalance } from '../../src/laya-live/recovery.js';
@@ -100,6 +104,138 @@ function botPosition(f, tokens = ['1', '2']) {
     f.holdings[tokens[0]] = 5;
     return position;
 }
+
+function emptyPosition(f) {
+    const market = { slug: 'btc-updown-5m-empty-reservation', conditionId: hash(700), tokens: ['1', '2'],
+        outcomes: ['Up', 'Down'], open: f.time - 300000, end: f.time - 1000 };
+    const position = f.state.position = newPosition(market, { cost: 4 }, f.state, f.time - 60000);
+    position.submitAttemptedAt = position.openedAt;
+    position.pendingTrades = false;
+    position.receiptRetries = {};
+    position.pendingSince = null;
+    f.state.seen[market.slug] = { at: position.openedAt, cost: 4, snapshotId: 'expired-entry' };
+    return position;
+}
+
+test('a stale pre-prepare veto finishes through normal reconciliation after a persisted busy hold', async t => {
+    const f = fixture(t);
+    t.mock.method(Date, 'now', () => f.time);
+    t.mock.method(globalThis, 'fetch', () => assert.fail('Empty reservation recovery must remain offline'));
+    Object.assign(f.settings, { continuousTrading: true, drawdownStop: 10, maxDataAgeMs: 5000,
+        entryCap: 5, pilotMarkets: Infinity, pilotHours: Infinity });
+    const position = emptyPosition(f);
+    const protection = { schema: 1, activatedAt: position.openedAt - 1000,
+        completedCount: 0, completedSha256: 'a'.repeat(64), consumed: [] };
+    f.state.profitTakingControl = { lossProtection: protection };
+    position.entrySignal = { lossProtection: { schema: 1, activationId: lossProtectionActivationId(protection),
+        before: captureLossWalletEvidence(f.state, { ...block(50), balance: f.balance, checkedAt: position.openedAt }) } };
+    delete position.submitAttemptedAt;
+    delete position.pendingTrades;
+    const spec = { tokenId: '1', index: 0, side: 'BUY', kind: 'taker', price: .78, shares: 5 };
+    const broker = new LayaLiveBroker(f.settings, f.store, f.client, async () => {
+        throw new Error('stale_eligible_input');
+    });
+    assert.equal((await broker.submit(spec, f.time)).status, 'rejected');
+    assert.equal(position.submitAttemptedAt, f.time);
+    assert.deepEqual(position.orders, []);
+    assert.equal(externalActivityCandidate(f.config, f.state), false, 'fresh account reconciliation is still required');
+    f.reconciler.defer('external_activity_busy');
+    const before = financialState(f.state), seen = structuredClone(f.state.seen);
+    const restored = new Store(f.settings, 'pilot', 'late-entry');
+    restored.logger = () => {};
+    const recovered = new LayaLiveBroker(f.settings, restored, f.client);
+    recovered.externalActivity = new ExternalActivityReconciler(f.config, restored, f.client,
+        { discover: f.discover, now: () => f.time });
+    f.client.payout = async () => null;
+    const engine = Object.assign(Object.create(MaintenanceEngine.prototype), {
+        settings: f.settings, store: restored, client: f.client, broker: recovered,
+        feed: { close() {} }, lastHeartbeat: f.time, boot: async () => {}, checkClock: async () => {},
+    });
+    await engine.tick(f.time);
+    assert.notEqual(restored.state.position, null, 'the persisted reconciliation backoff must still apply');
+    assert.equal(restored.state.completed.length, 0);
+    f.time = restored.state.entryHolds.external_activity.retryAt;
+    await engine.tick(f.time);
+    assert.equal(recovered.reconciliationComplete, true);
+    assert.equal(restored.state.position, null);
+    assert.deepEqual(restored.state.entryHolds, {});
+    assert.equal(restored.state.stopped, null);
+    assert.equal(restored.state.completed.length, 1);
+    const completed = restored.state.completed[0];
+    assert.equal(completed.traded, false);
+    assert.equal(completed.pnl, 0);
+    assert.deepEqual(completed.orders, []);
+    assert.deepEqual(completed.fills, []);
+    assert.equal(completed.entrySignal.lossProtection.after.balance, f.balance);
+    assert.equal(completed.entrySignal.lossProtection.after.blockNumber, f.tip);
+    assert.deepEqual(restored.state.seen, seen);
+    for (const key of ['cash', 'walletStart', 'walletCashDelta', 'liveFunding', 'capitalFunding'])
+        assert.deepEqual(restored.state[key], before[key]);
+    assert.equal(f.scans.length, 1);
+    assert.ok(f.reads.filter(([name]) => name === 'holdings').length >= 3);
+    assert.deepEqual(f.financialWrites, []);
+    await assert.rejects(recovered.submit(spec, f.time), /duplicate_entry_attempt/);
+    const durable = new Store(f.settings, 'pilot', 'late-entry').state;
+    assert.equal(durable.position, null);
+    assert.equal(durable.completed.length, 1);
+    assert.deepEqual(durable.seen, seen);
+});
+
+test('empty reservations still require full chain proof and never clear a hold from local fields alone', async t => {
+    for (const problem of ['balance mismatch', 'unexplained inventory', 'unavailable holdings'])
+        await t.test(problem, async t => {
+            const f = fixture(t); emptyPosition(f);
+            const before = financialState(f.state);
+            if (problem === 'balance mismatch') f.balance -= .000001;
+            if (problem === 'unexplained inventory') f.holdings['1'] = .000001;
+            if (problem === 'unavailable holdings') f.client.holdings = async () => {
+                throw new OperationalError('read_timeout', 'timeout', { stage: 'wallet_holdings' });
+            };
+            assert.equal(externalActivityCandidate(f.config, f.state), true);
+            assert.equal(await f.reconciler.reconcile(), false);
+            assert.deepEqual(financialState(f.state), before);
+            assert.equal(f.state.entryHolds.external_activity.retryable, true);
+            assert.equal(f.state.completed.length, 0);
+            assert.equal(f.state.externalWalletActivity, undefined);
+        });
+});
+
+test('an empty order list cannot conceal exposure, missing accounting, or unresolved evidence', async t => {
+    const cases = {
+        holdings: p => { p.holdings[0] = .000001; },
+        bought: p => { p.bought[0] = 5; },
+        malformedBought: p => { p.bought = []; },
+        fill: p => { p.fills.push({ hash: hash(702) }); },
+        missingFills: p => { delete p.fills; },
+        receipt: p => { p.receipts[hash(702)] = {}; },
+        malformedReceipts: p => { p.receipts = []; },
+        action: p => { p.actions.push({ status: 'confirmed' }); },
+        pendingOrder: p => { p.orders.push({ orderId: hash(701), status: 'unknown' }); },
+        pendingTrades: p => { p.pendingTrades = true; },
+        pendingSince: p => { p.pendingSince = p.openedAt; },
+        uncertain: p => { p.uncertain = true; },
+        missingUncertainty: p => { delete p.uncertain; },
+        invalidReservationTime: p => { p.openedAt = NaN; },
+        invalidSubmitTime: p => { p.submitAttemptedAt = p.openedAt - 1; },
+        missingCost: p => { delete p.entryCost; },
+        malformedRetries: p => { p.receiptRetries = []; },
+    };
+    for (const key of ['entryCost', 'fees', 'gas', 'rebate', 'lastDeployed', 'capitalHours'])
+        cases[key] = p => { p[key] = .000001; };
+    for (const key of ['receiptRetries', 'failedTrades', 'failedSettlementHashes'])
+        cases[key] = p => { p[key] = { unresolved: {} }; };
+    for (const key of ['accountQueryRetry', 'autoRedeemWait', 'autoRedeemRetry', 'actionPreparationRetry'])
+        cases[key] = p => { p[key] = { nextAt: p.openedAt }; };
+    for (const [name, change] of Object.entries(cases)) await t.test(name, async t => {
+        const f = fixture(t); change(emptyPosition(f));
+        const before = financialState(f.state);
+        assert.equal(externalActivityCandidate(f.config, f.state), false);
+        assert.equal(await f.reconciler.reconcile(), false);
+        assert.equal(f.scans.length, 0);
+        assert.deepEqual(financialState(f.state), before);
+        assert.equal(f.state.entryHolds.external_activity.error.code, 'external_activity_busy');
+    });
+});
 
 test('reviewed receipts survive zero-payout burn and new manual holdings without changing bot capital', async t => {
     const f = fixture(t, { reviewed: true }), before = financialState(f.state);

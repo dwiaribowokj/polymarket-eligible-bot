@@ -4,6 +4,7 @@ import crypto from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import { validateRiskPeriodRecord } from './period.js';
 import { ELIGIBLE_BUFFER_POLICY } from './entry-buffer.js';
+import { registerBaseSourceRepair } from './source-repair.js';
 import { continuationProfitTaking, registerVerifiedProfitTakingMigration,
     registerVerifiedEntryCostCapAdjustment } from './profit-policy-proof.js';
 
@@ -277,7 +278,56 @@ function validateEntryCostCapAdjustment(config, approval, depth) {
     return continuationProfitTaking(predecessor);
 }
 
+function validateBaseSourceRepair(config, approval) {
+    const keys = ['schema', 'runtimeId', 'originalRuntimeId', 'periodId', 'reason',
+        'originalManifestSha256', 'fundingSha256', 'ledgerStartedAt', 'wallet', 'dataDir',
+        'stateSha256', 'approvedAt'];
+    if (Object.keys(approval).length !== keys.length || keys.some(key => !Object.hasOwn(approval, key))
+        || approval.schema !== 1 || !ID.test(approval.runtimeId) || !ID.test(approval.originalRuntimeId)
+        || approval.periodId !== approval.originalRuntimeId || approval.runtimeId === approval.originalRuntimeId
+        || approval.runtimeId !== config.runtimeId || config.riskPeriod || config.runtimeContinuation
+        || !HASH.test(approval.originalManifestSha256) || !HASH.test(approval.fundingSha256)
+        || !HASH.test(approval.stateSha256) || !Number.isSafeInteger(approval.ledgerStartedAt)
+        || approval.ledgerStartedAt < 0 || !Number.isSafeInteger(approval.approvedAt)
+        || approval.approvedAt < approval.ledgerStartedAt
+        || !/^0x[a-f0-9]{40}$/.test(approval.wallet) || /^0x0{40}$/.test(approval.wallet)
+        || approval.wallet !== config.settings.wallet?.toLowerCase()
+        || !path.isAbsolute(config.settings.dataDir) || !validSources(config.sources)
+        || jsonHash({ policy: config.policy, sources: config.sources,
+            profitTaking: config.profitTaking }).slice(0, 16) !== config.runtimeId) fail('approval_mismatch');
+    const dataDir = fs.realpathSync(config.settings.dataDir);
+    if (dataDir !== approval.dataDir) fail('unsafe_path');
+    const riskRoot = path.join(dataDir, 'eligible-risk-periods');
+    try { if (!fs.lstatSync(riskRoot).isDirectory()) fail('unsafe_path'); }
+    catch (error) { if (error.code !== 'ENOENT') throw error; }
+    // A base-period repair cannot acknowledge, replace, or bypass a risk period.
+    for (const runtime of [approval.originalRuntimeId, config.runtimeId]) {
+        try { fs.lstatSync(path.join(riskRoot, runtime)); fail('base_period_conflict'); }
+        catch (error) { if (error.code !== 'ENOENT') throw error; }
+    }
+    const bytes = readArtifact(dataDir, approval.periodId, 'eligible-runtime', 'manifest.json');
+    if (digest(bytes) !== approval.originalManifestSha256) fail('manifest_changed');
+    const manifest = parse(bytes);
+    if (manifest.id !== approval.periodId || manifest.startedAt !== approval.ledgerStartedAt
+        || manifest.runtimeId != null && manifest.runtimeId !== approval.originalRuntimeId
+        || !validSources(manifest.sources) || !isDeepStrictEqual(manifest.policy, config.policy)
+        || !isDeepStrictEqual(manifest.profitTaking, config.profitTaking)
+        || jsonHash({ policy: manifest.policy, sources: manifest.sources,
+            profitTaking: manifest.profitTaking }).slice(0, 16) !== approval.originalRuntimeId)
+        fail('manifest_mismatch');
+    const ledger = parse(readArtifact(dataDir, approval.periodId, 'pilot', 'late-entry.json'));
+    if (ledger.baseline !== approval.periodId || ledger.mode !== 'pilot' || ledger.strategy !== 'late-entry'
+        || ledger.decisionProvider !== 'eligible' || ledger.startedAt !== approval.ledgerStartedAt
+        || !record(ledger.liveFunding) || jsonHash(ledger.liveFunding) !== approval.fundingSha256)
+        fail('ledger_mismatch');
+    const settings = { ...config.settings, fingerprint: approval.periodId };
+    return registerBaseSourceRepair({ ...config, id: approval.periodId, settings,
+        ai: { ...config.ai, id: approval.periodId, control: settings },
+        riskRuntimeId: approval.originalRuntimeId, runtimeContinuation: deepFreeze(approval) });
+}
+
 function validateContinuation(config, approval, depth = 0) {
+    if (approval.reason === 'base_period_source_repair') return validateBaseSourceRepair(config, approval);
     if (depth > 8) fail('approval_depth');
     if (approval.schema !== 1 || !ID.test(approval.runtimeId) || !ID.test(approval.originalRuntimeId)
         || !ID.test(approval.periodId) || approval.runtimeId === approval.originalRuntimeId

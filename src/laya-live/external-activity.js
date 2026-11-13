@@ -131,6 +131,24 @@ function terminalEmptyOrder(order) {
         && ['CANCELED', 'CANCELLED', 'EXPIRED', 'UNMATCHED'].includes(String(order.apiTerminal.status).toUpperCase());
 }
 
+function emptyReservation(position) {
+    // Validation can veto after reservation but before an order is prepared.
+    // Admit only its untouched accounting; wallet and inventory proof still run.
+    return position.uncertain === false && integer(position.openedAt)
+        && (position.submitAttemptedAt === undefined || integer(position.submitAttemptedAt)
+            && position.submitAttemptedAt >= position.openedAt)
+        && position.holdings.every(value => value === 0)
+        && Array.isArray(position.bought) && position.bought.length === 2 && position.bought.every(value => value === 0)
+        && Array.isArray(position.fills) && position.fills.length === 0
+        && Array.isArray(position.actions) && position.actions.length === 0
+        && record(position.receipts) && Object.keys(position.receipts).length === 0
+        && ['entryCost', 'fees', 'gas', 'rebate', 'lastDeployed', 'capitalHours'].every(key => position[key] === 0)
+        && ['receiptRetries', 'failedTrades', 'failedSettlementHashes'].every(key => position[key] === undefined
+            || record(position[key]) && Object.keys(position[key]).length === 0)
+        && ['pendingSince', 'accountQueryRetry', 'autoRedeemWait', 'autoRedeemRetry', 'actionPreparationRetry']
+            .every(key => position[key] == null);
+}
+
 function stablePosition(position) {
     if (position == null) return true;
     return record(position) && position.pendingTrades === false && position.uncertain !== true
@@ -138,7 +156,7 @@ function stablePosition(position) {
         && new Set(position.market.tokens).size === 2 && position.market.tokens.every(token => TOKEN.test(token))
         && Array.isArray(position.holdings) && position.holdings.length === 2
         && position.holdings.every(value => Number.isFinite(value) && units(value) >= 0n)
-        && Array.isArray(position.orders) && position.orders.length > 0
+        && Array.isArray(position.orders) && (position.orders.length > 0 || emptyReservation(position))
         && position.orders.every(order => record(order) && (order.status === 'rejected' && !(order.filled > 0)
             || ['complete', 'cancelled'].includes(order.status) && order.receiptProvenComplete === true
             || terminalEmptyOrder(order)))

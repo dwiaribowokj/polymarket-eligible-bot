@@ -10,6 +10,7 @@ import { expectedWalletBalance } from '../laya-live/recovery.js';
 import { reconcilePeriodTrades } from './period-trades.js';
 import { ELIGIBLE_BUFFER_POLICY } from './entry-buffer.js';
 import { continuationProfitTaking, verifiedEntryCostCapAdjustment } from './profit-policy-proof.js';
+import { verifiedBaseSourceRepair } from './source-repair.js';
 
 function pilotHistorySnapshots(settings) {
     if (!fs.existsSync(settings.dataDir)) return [];
@@ -187,6 +188,10 @@ function activeRecord(config) {
 
 export function bindRiskPeriod(config) {
     const { value } = activeRecord(config);
+    if (verifiedBaseSourceRepair(config)) {
+        if (value || config.riskPeriod) fail('base_period_conflict');
+        return config;
+    }
     if (!value) {
         if (config.riskPeriod || config.runtimeContinuation) fail('missing_pointer');
         return config;
