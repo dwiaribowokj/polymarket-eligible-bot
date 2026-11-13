@@ -1,0 +1,63 @@
+# Dependencies and generated output
+node_modules/
+dist/
+build/
+coverage/
+__pycache__/
+*.pyc
+.DS_Store
+
+# Private environment files (only empty templates belong in Git)
+.env
+.env.*
+!.env.example
+*.env
+*.env.*
+!*.env.example
+.envrc
+.npmrc
+.netrc
+
+# Wallets, credentials, keys and local configuration
+secrets/
+private/
+credentials/
+wallets/
+.config/
+*.pem
+*.key
+*.p12
+*.pfx
+*.keystore
+*credentials*.json
+*wallet*.json
+
+# All runtime state, including diagnostics and frozen signed orders
+/data/
+/logs/
+*.log
+*.jsonl
+*.sqlite*
+*.db
+*.db-*
+*.pid
+*.sock
+*.lock.tmp
+
+# Local backups and exported snapshots
+*.bak
+*.backup
+*.old
+*.tmp
+*.swp
+*.zip
+*.tar
+*.tar.gz
+/release/
+/releases/
+
+# Operational incident notes contain personal wallet/transaction information.
+# Keep only portable setup and reference documentation in the new repository.
+/docs/*
+!/docs/setup.md
+!/docs/reference.md

@@ -1,0 +1,16 @@
+{
+  "cash": 12.5,
+  "stopped": null,
+  "position": null,
+  "completed": [
+    {
+      "slug": "historical",
+      "openedAt": 1700000000000,
+      "closedAt": 1700000300000,
+      "traded": true,
+      "pnl": 0.5,
+      "entryCost": 4.5,
+      "orders": [{ "orderId": "fixture-order", "filled": 5 }]
+    }
+  ]
+}

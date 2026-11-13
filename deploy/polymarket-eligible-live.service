@@ -1,0 +1,20 @@
+[Unit]
+Description=Polymarket eligible live (manual activation, no AI, real funds)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/polymarket-eligible-bot
+Environment=
+ExecStart=/usr/bin/node scripts/eligible-live.js run --live
+Restart=no
+TimeoutStopSec=45
+UMask=0077
+NoNewPrivileges=true
+Nice=10
+StandardOutput=journal
+StandardError=journal
+
+# The runner reads this checkout's .env at runtime. Activation is manual only.
+# No Install target: installing the unit cannot enable trading on login.

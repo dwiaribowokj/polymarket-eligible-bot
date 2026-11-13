@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+script_path="$(readlink -f -- "${BASH_SOURCE[0]}")"
+repo_dir="$(cd -- "$(dirname -- "$script_path")/.." && pwd -P)"
+
+is_node24() {
+    [[ -n "$1" && -x "$1" ]] && [[ "$("$1" -p 'process.versions.node.split(".")[0]' 2>/dev/null)" == 24 ]]
+}
+
+node_bin="${POLYMARKET_NODE:-}"
+if [[ -z "$node_bin" ]]; then
+    node_bin="$(command -v node || true)"
+    if ! is_node24 "$node_bin"; then
+        for candidate in "${NVM_DIR:-$HOME/.nvm}"/versions/node/v24.*/bin/node; do
+            if is_node24 "$candidate"; then node_bin="$candidate"; break; fi
+        done
+    fi
+fi
+if ! is_node24 "$node_bin"; then
+    echo 'Poly memerlukan Node.js 24. Set POLYMARKET_NODE ke executable Node 24.' >&2
+    exit 1
+fi
+exec "$node_bin" "$repo_dir/scripts/eligible-live-control.js" "$@"

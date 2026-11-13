@@ -1,0 +1,87 @@
+{
+  "name": "polymarket-eligible-bot",
+  "version": "1.0.0",
+  "description": "Rule-based Bitcoin Up/Down trading bot for Polymarket with paper evaluation, CLOB V2 execution, and automatic settlement",
+  "main": "src/index.js",
+  "type": "module",
+  "scripts": {
+    "start": "node src/restart.js",
+    "dev": "nodemon --ignore 'data/*.json' src/index.js",
+    "bot": "node src/bot.js",
+    "bot-sim": "DRY_RUN=true node src/bot.js",
+    "bot-dev": "DRY_RUN=true nodemon --ignore 'data/*.json' src/bot.js",
+    "mm": "DRY_RUN=false node src/mm.js",
+    "mm-sim": "DRY_RUN=true node src/mm.js",
+    "mm-dev": "DRY_RUN=true nodemon --ignore 'data/*.json' src/mm.js",
+    "mm-bot": "node src/mm-bot.js",
+    "mm-bot-sim": "DRY_RUN=true node src/mm-bot.js",
+    "mm-bot-dev": "DRY_RUN=true nodemon --ignore 'data/*.json' src/mm-bot.js",
+    "sniper": "DRY_RUN=false node src/sniper.js",
+    "sniper-sim": "DRY_RUN=true node src/sniper.js",
+    "sniper-dev": "DRY_RUN=true nodemon --ignore 'data/*.json' src/sniper.js",
+    "sniper-tui": "DRY_RUN=false node src/sniper-tui.js",
+    "sniper-tui-sim": "DRY_RUN=true node src/sniper-tui.js",
+    "sniper-tui-dev": "DRY_RUN=true nodemon --ignore 'data/*.json' src/sniper-tui.js",
+    "maker-mm": "DRY_RUN=false node src/maker-mm.js",
+    "maker-mm-sim": "DRY_RUN=true node src/maker-mm.js",
+    "maker-mm-bot": "node src/maker-mm-bot.js",
+    "maker-mm-bot-sim": "DRY_RUN=true node src/maker-mm-bot.js",
+    "postinstall": "node scripts/patch-clob-client.cjs",
+    "preflight": "node src/restart.js preflight",
+    "paper": "node src/restart.js paper",
+    "pilot": "node src/restart.js pilot",
+    "report": "node src/restart.js report",
+    "test": "node --test test/restart/*.test.js test/ai-shadow/*.test.js test/laya-tuning/*.test.js",
+    "ai-shadow": "node scripts/ai-shadow.js",
+    "legacy-terminal": "node src/index.js",
+    "device": "node scripts/device.js",
+    "laya:paper": "node scripts/device.js paper",
+    "laya:preflight": "node scripts/laya-pilot.js preflight",
+    "laya:report": "node scripts/laya-pilot.js report",
+    "laya:start": "node scripts/device.js live start",
+    "laya:stop": "node scripts/device.js live stop",
+    "laya:status": "node scripts/device.js live status",
+    "laya:check": "node scripts/device.js live check",
+    "laya:config": "node scripts/device.js live config",
+    "laya:logs": "node scripts/device.js live logs",
+    "laya:live-report": "node scripts/laya-live.js report",
+    "laya:tune": "node scripts/laya-tune.js",
+    "release:check": "node scripts/release.js check",
+    "release:export": "node scripts/release.js export"
+  },
+  "keywords": [
+    "polymarket",
+    "trading-bot",
+    "bitcoin",
+    "rule-based"
+  ],
+  "author": "direkturcrypto",
+  "license": "ISC",
+  "dependencies": {
+    "@polymarket/client": "0.12.0",
+    "@polymarket/clob-client": "4.22.8",
+    "@polymarket/types": "0.2.0",
+    "blessed": "0.1.81",
+    "dotenv": "16.6.1",
+    "ethers": "5.8.0",
+    "global-agent": "4.1.2",
+    "https-proxy-agent": "7.0.6",
+    "undici": "7.22.0",
+    "viem": "2.46.3",
+    "ws": "8.22.0"
+  },
+  "devDependencies": {
+    "nodemon": "3.1.14"
+  },
+  "engines": {
+    "node": "24.x"
+  },
+  "overrides": {
+    "@ethersproject/providers": {
+      "ws": "7.5.13"
+    },
+    "viem": {
+      "ws": "8.22.0"
+    }
+  }
+}

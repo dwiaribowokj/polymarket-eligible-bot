@@ -1,0 +1,21 @@
+[Unit]
+Description=Polymarket Laya prospective filter observer (local files only)
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/polymarket-eligible-bot
+ExecStart=/usr/bin/node scripts/laya-filter-shadow.js run --out=/opt/polymarket-eligible-bot/data/laya-filter-shadow/active
+Restart=on-failure
+RestartSec=15
+TimeoutStopSec=15
+UMask=0077
+NoNewPrivileges=true
+RestrictAddressFamilies=AF_UNIX
+Nice=15
+CPUQuota=10%
+MemoryMax=256M
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target

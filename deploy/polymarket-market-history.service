@@ -1,0 +1,21 @@
+[Unit]
+Description=Public Binance BTCUSDT candle history collector
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/polymarket-eligible-bot
+EnvironmentFile=-%h/.config/polymarket-market-history.env
+ExecStart=/usr/bin/node scripts/market-history.js run
+Restart=on-failure
+RestartSec=15
+TimeoutStopSec=15
+UMask=0077
+NoNewPrivileges=true
+Nice=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target

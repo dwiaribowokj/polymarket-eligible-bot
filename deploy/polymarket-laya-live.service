@@ -1,0 +1,17 @@
+[Unit]
+Description=Polymarket Laya live pilot (manual activation, real funds)
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/polymarket-eligible-bot
+EnvironmentFile=-%h/.config/polymarket-ai-shadow.env
+ExecStart=/usr/bin/node scripts/laya-live.js run --live
+Restart=no
+TimeoutStopSec=45
+UMask=0077
+NoNewPrivileges=true
+Nice=10
+
+# Deliberately no Install target: funding alone cannot enable this service.

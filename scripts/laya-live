@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
+node_bin="${POLYMARKET_NODE:-$(command -v node || true)}"
+if [[ ! -x "$node_bin" ]]; then
+    node_bin="$(command -v node || true)"
+fi
+if [[ -z "$node_bin" ]] || [[ "$("$node_bin" -p 'process.versions.node.split(".")[0]')" != 24 ]]; then
+    echo 'Laya memerlukan Node.js 24. Set POLYMARKET_NODE ke executable Node 24.' >&2
+    exit 1
+fi
+exec "$node_bin" "$repo_dir/scripts/device.js" live "$@"

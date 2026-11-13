@@ -1,0 +1,21 @@
+[Unit]
+Description=Polymarket premarket momentum comparison (virtual funds only)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/polymarket-eligible-bot
+EnvironmentFile=-%h/.config/polymarket-premarket-paper.env
+ExecStart=/usr/bin/node scripts/premarket-paper.js run --out=/opt/polymarket-eligible-bot/data/premarket-paper/period-001
+Restart=on-failure
+RestartSec=15
+TimeoutStopSec=90
+UMask=0077
+NoNewPrivileges=true
+Nice=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target

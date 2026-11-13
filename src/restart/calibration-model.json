@@ -1,0 +1,72 @@
+{
+  "schema": 1,
+  "id": "late-twap-temperature-v4",
+  "datasetSha256": "d794d1f5f1afbc0b1368a0c1ccb97f1edbcfd5724ca6b7a61648a15c13b3cde6",
+  "sources": [
+    {
+      "baseline": "38758ee30d012b87",
+      "eventLogSha256": "7198f2582c33914f5d31e8c5a2afc4a1b8ef6356de7d435c11694caebfea21b0"
+    },
+    {
+      "baseline": "a3bfb5a04d5eed4e",
+      "eventLogSha256": "c55f18ebb2ef10059ade995fcfc459b1af37e85a1a6ef496c6fce49c53cfe7e3"
+    }
+  ],
+  "scoredMarketsLabeled": 293,
+  "selection": "first_quote_valid_direction_coherent_original_signal_pass_per_market",
+  "method": "probit_temperature_v1",
+  "temperature": 1.5,
+  "status": "provisional",
+  "researchOnly": true,
+  "qualifiedForLive": false,
+  "independentMarkets": 38,
+  "trainingMarkets": 25,
+  "validationMarkets": 13,
+  "trainedThrough": 1791569400000,
+  "validationStartsAt": 1791570600000,
+  "validationEndsAt": 1791648000000,
+  "heldOutImproved": true,
+  "training": {
+    "raw": {
+      "markets": 25,
+      "wins": 23,
+      "meanPrediction": 0.977024,
+      "winRate": 0.92,
+      "brier": 0.077329,
+      "logLoss": 0.326525
+    },
+    "adjusted": {
+      "markets": 25,
+      "wins": 23,
+      "meanPrediction": 0.917622,
+      "winRate": 0.92,
+      "brier": 0.074107,
+      "logLoss": 0.272139
+    }
+  },
+  "validation": {
+    "raw": {
+      "markets": 13,
+      "wins": 10,
+      "meanPrediction": 0.967074,
+      "winRate": 0.769231,
+      "brier": 0.210722,
+      "logLoss": 0.809535
+    },
+    "adjusted": {
+      "markets": 13,
+      "wins": 10,
+      "meanPrediction": 0.896261,
+      "winRate": 0.769231,
+      "brier": 0.186049,
+      "logLoss": 0.586945
+    }
+  },
+  "limitations": [
+    "small_sample",
+    "few_observed_days",
+    "selected_entry_candidates",
+    "historical_predictions_are_not_simulated_fills",
+    "requires_new_frozen_paper_period"
+  ]
+}

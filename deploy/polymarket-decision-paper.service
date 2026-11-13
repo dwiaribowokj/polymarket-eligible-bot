@@ -1,0 +1,21 @@
+[Unit]
+Description=Polymarket Laya and Gemini decision paper (virtual funds only)
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/polymarket-eligible-bot
+EnvironmentFile=-%h/.config/polymarket-ai-shadow.env
+ExecStart=/usr/bin/node scripts/decision-paper.js run --out=/opt/polymarket-eligible-bot/data/decision-paper/period-001
+Restart=on-failure
+RestartSec=15
+TimeoutStopSec=45
+UMask=0077
+NoNewPrivileges=true
+Nice=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target
