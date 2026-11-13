@@ -4,7 +4,7 @@ import { atomicJson } from '../restart/store.js';
 import { dailyBootstrap, round } from '../restart/math.js';
 import { summarizeFilterPaper } from '../laya-filter-paper/report.js';
 import { EARLY_BOOK_POLICY } from '../premarket-paper/early-book.js';
-import { LIVE_COST_CAP_PROFILE, LIVE_TUNING_RECOVERY_PROFILE, isLiveTuningProfile } from './config.js';
+import { LIVE_COST_CAP_PROFILE, LIVE_MOMENTUM_PROFILE, LIVE_TUNING_RECOVERY_PROFILE, isLiveTuningProfile } from './config.js';
 
 const DAY = 86400000;
 const WIB = 7 * 3600000;
@@ -21,7 +21,7 @@ const sameArms = (names, expected) => validArms(names) && names.length === expec
 const slugOf = row => row.slug || (typeof row.market === 'string' ? row.market : row.market?.slug);
 const FILTER_REJECTIONS = new Set(['entry_cost_above_cap', 'entry_filter_direction_conflict',
     'entry_filter_insufficient_buffer', 'entry_filter_closing_direction_conflict', 'entry_filter_closing_insufficient_buffer',
-    'entry_slot_not_selected', 'entry_ask_drop_above_limit']);
+    'entry_slot_not_selected', 'entry_ask_drop_above_limit', 'entry_momentum_not_aligned']);
 const FILTER_VETOES = new Set(['filter_veto', 'execution_filter_veto']);
 const AVAILABILITY_REJECTIONS = new Set(['arm_stopped', 'arm_unavailable', 'closed', 'deadline', 'slot_ineligible']);
 const counts = (rows, key) => Object.fromEntries(rows.reduce((result, row) => {
@@ -496,7 +496,7 @@ export function summarizeEntryFilterPaper(state, config, now = Date.now()) {
     report.collectionSummary = collectionSummary(state, config, now);
     report.comparisonBasis = 'common_entry_window';
     report.allPeriodTotalsBasis = 'descriptive_actual_ledgers_with_potentially_unequal_active_horizons';
-    if ([LIVE_TUNING_RECOVERY_PROFILE, LIVE_COST_CAP_PROFILE].includes(config.profile)) for (const name of config.armNames)
+    if ([LIVE_TUNING_RECOVERY_PROFILE, LIVE_COST_CAP_PROFILE, LIVE_MOMENTUM_PROFILE].includes(config.profile)) for (const name of config.armNames)
         report.arms[name].researchEligibility = report.commonEntryWindow.arms[name].researchEligibility;
     report.limitations.push('all_period_arm_totals_may_have_unequal_active_horizons',
         'marginal_filter_selection_is_not_causal', 'independent_subsequent_holdout_required_before_live_review');
@@ -528,10 +528,13 @@ export function summarizeEntryFilterPaper(state, config, now = Date.now()) {
             observationPolicy: config.observationPolicy ?? null,
             passiveCollection: config.passiveCollection ?? null, evaluationPolicy: config.evaluationPolicy ?? null,
             armPolicies: config.armPolicies ?? null, tuningPolicy: config.tuningPolicy ?? null,
+            momentumPolicy: config.momentumPolicy ?? null,
             baselinePolicy: config.armPolicies?.[config.baselineArm] || config.baselineArm,
             modelIndependent: true, virtualArmProfitsAreAdditive: false,
             interpretation: config.profile === LIVE_COST_CAP_PROFILE
                 ? 'separate_full_fill_all_in_cost_caps_compared_prospectively_on_independent_virtual_balances'
+                : config.profile === LIVE_MOMENTUM_PROFILE
+                ? 'fixed_cost_control_with_primary_directional_momentum30_and_secondary_execution_ask_drop_filter'
                 : liveTuning
                 ? 'fixed_cost_control_compared_with_separate_slot_and_execution_ask_drop_filters_on_independent_virtual_balances'
                 : 'fixed_cost_and_volatility_filters_compared_prospectively_on_independent_virtual_balances' },
@@ -546,7 +549,8 @@ function markdown(report) {
     const breakdown = value => value === null ? 'belum tercatat' : Object.entries(value)
         .map(([reason, count]) => `${reason}: ${count}`).join('; ') || 'tidak ada';
     const operational = report.operationalSummary;
-    const liveTuning = isLiveTuning(report), costComparison = report.profile === LIVE_COST_CAP_PROFILE;
+    const liveTuning = isLiveTuning(report), costComparison = report.profile === LIVE_COST_CAP_PROFILE,
+        momentumComparison = report.profile === LIVE_MOMENTUM_PROFILE;
     const window = report.commonEntryWindow, collection = report.collectionSummary;
     return [`# Entry filter paper - ${report.id}`, '', `Diperbarui: ${report.generatedAt}.`,
         `Mulai periode: ${operational.startedAt || 'belum tercatat'}; umur observasi ${age(operational.elapsedMs)} (sampai ${operational.evaluationAt}).`,
@@ -556,13 +560,16 @@ function markdown(report) {
             ? `Hipotesis ditetapkan sebelum periode: batas biaya penuh per share pada limit entry, termasuk fee dan gas: ${report.armNames.map(name => `${name} maksimum ${money(report.hypothesis.armCostCaps?.[name])}`).join('; ')}.`
             : `Hipotesis ditetapkan sebelum periode: biaya penuh per share maksimum ${money(report.hypothesis.costCapPerShare)} pada limit entry, termasuk fee dan gas${liveTuning ? '.' : `; buffer volatilitas ${report.hypothesis.entryFilter?.minBufferSigma ?? '-'} sigma.`}`,
         ...(costComparison ? ['Dua arm membandingkan batas biaya dengan slot, modal awal, latensi, dan asumsi eksekusi yang sama. Arm yang masuk pada snapshot yang sama memakai book eksekusi bersama.']
+            : momentumComparison ? [`Hipotesis utama: ${report.hypothesis.tuningPolicy?.primaryArm} hanya entry bila return BTC 30 detik searah transaksi (UP >0, DOWN <0); nilai nol atau data tidak valid ditolak. Pembanding sekunder ${report.hypothesis.tuningPolicy?.secondaryArm} menolak penurunan ask lebih dari ${money(report.hypothesis.tuningPolicy?.maxAskDropUsd)} sebelum simulasi eksekusi. Kedua filter diuji terpisah.`]
             : liveTuning ? [`Tiga arm membandingkan Cost-cap kontrol, entry hanya pada slot sisa ${report.hypothesis.tuningPolicy?.selectedSlotSeconds ?? '-'} detik, dan penolakan terpisah bila ask eksekusi turun lebih dari ${money(report.hypothesis.tuningPolicy?.maxAskDropUsd)} dari ask snapshot awal.`] : []),
         costComparison ? 'Batas biaya adalah hipotesis yang diuji, bukan probabilitas menang. Profit antar arm tidak dijumlahkan.'
+            : momentumComparison ? 'Momentum searah dan penurunan ask adalah hipotesis yang diuji, bukan probabilitas menang. Pembanding sekunder bersifat eksploratif; profit antar arm tidak dijumlahkan.'
             : liveTuning ? 'Batas biaya, pemilihan slot, dan batas penurunan ask adalah hipotesis yang diuji, bukan probabilitas menang. Profit antar arm tidak dijumlahkan.'
             : 'Batas biaya bukan estimasi keuntungan, dan buffer bukan probabilitas menang. Profit antar arm tidak dijumlahkan.', '',
         ...(report.hypothesis.armPolicies ? Object.entries(report.hypothesis.armPolicies)
             .map(([name, policy]) => `- Kebijakan ${name}: ${typeof policy === 'string' ? policy : JSON.stringify(policy)}.`) : []),
         ...(report.hypothesis.tuningPolicy ? [`Aturan tuning yang dibekukan: ${JSON.stringify(report.hypothesis.tuningPolicy)}.`] : []),
+        ...(report.hypothesis.momentumPolicy ? [`Aturan momentum yang dibekukan: ${JSON.stringify(report.hypothesis.momentumPolicy)}.`] : []),
         `Checkpoint awal: ${report.evaluationSchedule.firstCheckpointAt || 'menunggu waktu mulai'} (24 jam, evaluasi operasional awal; belum bukti kelulusan).`,
         `Evaluasi statistik paling cepat: ${report.evaluationSchedule.minimumDurationAt || 'menunggu waktu mulai'}, dengan sedikitnya ${report.evaluationSchedule.minimumCompletedFilledPerArm} market selesai terisi per arm dan CI bootstrap harian positif. Tidak mengubah live otomatis.`, '',
         ...(window ? [
@@ -666,6 +673,7 @@ export function readEntryFilterPaperReports(config, history = false) {
         return { ...report, periodPolicy: { schema: policy.schema ?? null, experiment: policy.experiment,
             profile: policy.profile ?? null, armPolicies: policy.armPolicies ?? null,
             tuningPolicy: policy.tuningPolicy ?? null,
+            momentumPolicy: policy.momentumPolicy ?? null,
             passiveCollection: policy.passiveCollection ?? null, evaluationPolicy: policy.evaluationPolicy ?? null,
             armNames: [...policy.armNames], baselineArm: policy.baselineArm, inferencePolicy: policy.inferencePolicy,
             costCapPerShare: policy.costCapPerShare, armCostCaps: policy.armCostCaps ?? null, entryFilter: policy.entryFilter,

@@ -4,15 +4,18 @@ import path from 'node:path';
 import { loadFilterPaperConfig } from '../laya-filter-paper/config.js';
 import { ENTRY_FILTER_POLICY } from '../decision-paper/entry-filter.js';
 import { DECISION_CONTEXT_VERSION } from '../decision-paper/features.js';
+import { MOMENTUM30_POLICY } from './momentum.js';
 
 export const ENTRY_FILTER_ARMS = Object.freeze(['eligible', 'cost-cap', 'buffer', 'combined']);
 export const LIVE_TUNING_PROFILE = 'live-tuning-v1';
 export const LIVE_TUNING_RECOVERY_PROFILE = 'live-tuning-v2';
 export const LIVE_COST_CAP_PROFILE = 'live-cost-cap-v1';
+export const LIVE_MOMENTUM_PROFILE = 'live-momentum-v1';
 export const isLiveTuningProfile = profile => [LIVE_TUNING_PROFILE, LIVE_TUNING_RECOVERY_PROFILE,
-    LIVE_COST_CAP_PROFILE].includes(profile);
+    LIVE_COST_CAP_PROFILE, LIVE_MOMENTUM_PROFILE].includes(profile);
 export const LIVE_TUNING_ARMS = Object.freeze(['cost-cap-control', 'cost-cap-90s', 'cost-cap-drop-2c']);
 export const LIVE_COST_CAP_ARMS = Object.freeze(['cost-cap-control', 'cost-cap-082']);
+export const LIVE_MOMENTUM_ARMS = Object.freeze(['cost-cap-control', 'cost-cap-momentum30', 'cost-cap-drop-2c']);
 export const LIVE_TUNING_POLICY = Object.freeze({ version: LIVE_TUNING_PROFILE,
     selectedSlotSeconds: 90, maxAskDropUsd: 0.02, askDropComparison: 'strictly-greater',
     askDropBasis: 'snapshot-best-ask-to-shared-execution-best-ask',
@@ -58,7 +61,7 @@ export function loadEntryFilterPaperConfig(env = process.env, out, profile = nul
             'cost-cap-90s': 'cost-cap-and-only-90-second-slot',
             'cost-cap-drop-2c': 'cost-cap-and-execution-ask-drop-at-most-002' }
     });
-    if ([LIVE_TUNING_RECOVERY_PROFILE, LIVE_COST_CAP_PROFILE].includes(profile)) Object.assign(policy, {
+    if ([LIVE_TUNING_RECOVERY_PROFILE, LIVE_COST_CAP_PROFILE, LIVE_MOMENTUM_PROFILE].includes(profile)) Object.assign(policy, {
         experiment: 'entry-filter-paper-live-tuning-v2',
         executionPolicy: 'shared-admission-and-verified-book-recovery-v2',
         executionBook: 'validated-websocket-or-fresh-rest',
@@ -81,6 +84,34 @@ export function loadEntryFilterPaperConfig(env = process.env, out, profile = nul
         tuningPolicy: { version: LIVE_COST_CAP_PROFILE, firstCheckpointHours: 24,
             admissionVetoConsumesMarketAttempt: false, reservedOrderConsumesMarketAttempt: true,
             promotion: 'manual-review-only', fillSimulation: LIVE_TUNING_POLICY.fillSimulation }
+    });
+    if (profile === LIVE_MOMENTUM_PROFILE) Object.assign(policy, {
+        experiment: 'entry-filter-paper-live-momentum-v1', armNames: [...LIVE_MOMENTUM_ARMS],
+        comparison: 'preregistered-momentum30-primary-and-ask-drop-secondary', costCapPerShare: 0.82,
+        armCostCaps: Object.fromEntries(LIVE_MOMENTUM_ARMS.map(name => [name, 0.82])),
+        momentumPolicy: { ...MOMENTUM30_POLICY },
+        armPolicies: { 'cost-cap-control': 'full-fill-all-in-cost-at-most-082',
+            'cost-cap-momentum30': 'cost-cap-082-and-strict-directional-momentum30',
+            'cost-cap-drop-2c': 'cost-cap-082-and-execution-ask-drop-at-most-002' },
+        tuningPolicy: { version: LIVE_MOMENTUM_PROFILE, firstCheckpointHours: 24,
+            primaryArm: 'cost-cap-momentum30', secondaryArm: 'cost-cap-drop-2c',
+            maxAskDropUsd: 0.02, askDropComparison: 'strictly-greater',
+            askDropBasis: LIVE_TUNING_POLICY.askDropBasis, askDropArithmetic: 'exact-decimal',
+            admissionVetoConsumesMarketAttempt: false, reservedOrderConsumesMarketAttempt: true,
+            promotion: 'manual-review-only', fillSimulation: LIVE_TUNING_POLICY.fillSimulation },
+        evaluationPolicy: { ...policy.evaluationPolicy,
+            primaryMetric: 'candidate-minus-control-net-pnl-per-common-resolved-opportunity-market',
+            primaryCohort: 'officially-labeled-markets-with-usable-shared-entry-observation-and-complete-outcomes',
+            primaryCohortExclusions: ['diagnostic-only', 'no-eligible-side',
+                'missing-or-ambiguous-outcomes', 'entry-outside-common-window'],
+            secondaryMetrics: ['net-pnl', 'net-pnl-per-fill', 'profit-winrate', 'direction-correctness',
+                'fill-frequency', 'opportunity-coverage', 'maximum-drawdown'],
+            uncertainty: 'paired-common-market-differences-calendar-day-block-bootstrap',
+            opportunityCoverageReportedSeparately: true,
+            insufficientExposure: 'inconclusive-no-risk-stop-reset',
+            secondaryComparison: 'exploratory-until-independent-confirmation',
+            parameterSelection: 'frozen-before-period-no-retuning',
+            liveExecutionSensitivity: 'required-fixed-five-shares-versus-principal-budget-fak' }
     });
     const sources = [...base.sources];
     const cli = 'scripts/entry-filter-paper.js';

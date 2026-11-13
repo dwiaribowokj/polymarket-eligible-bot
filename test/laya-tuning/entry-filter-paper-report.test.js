@@ -7,7 +7,8 @@ import { Worker } from 'node:worker_threads';
 import { summarizeEntryFilterPaper, saveEntryFilterPaperReport, readEntryFilterPaperReports }
     from '../../src/entry-filter-paper/report.js';
 import { readEntryFilterRestBooks } from '../../src/entry-filter-paper/book-source.js';
-import { loadEntryFilterPaperConfig, LIVE_COST_CAP_PROFILE } from '../../src/entry-filter-paper/config.js';
+import { loadEntryFilterPaperConfig, LIVE_COST_CAP_PROFILE, LIVE_MOMENTUM_PROFILE }
+    from '../../src/entry-filter-paper/config.js';
 import { EntryFilterPaperStore } from '../../src/entry-filter-paper/store.js';
 
 const ARMS = ['eligible', 'cost-cap', 'buffer', 'combined'];
@@ -451,6 +452,57 @@ test('cost comparison loader reports both frozen caps and a separate two-arm che
     assert.deepEqual(checkpoint.hypothesis.armCostCaps, costConfig.armCostCaps);
     const saved = readEntryFilterPaperReports({ dataDir: directory });
     assert.deepEqual(saved.periodPolicy.armCostCaps, costConfig.armCostCaps);
+});
+
+test('momentum report preserves frozen primary and secondary hypotheses without claiming eligibility', t => {
+    const directory = temporary(t), runtime = loadEntryFilterPaperConfig({}, directory, LIVE_MOMENTUM_PROFILE);
+    const store = new EntryFilterPaperStore(runtime, START);
+    const report = saveEntryFilterPaperReport(runtime, store.state, START + DAY);
+    assert.equal(report.hypothesis.costCapPerShare, .82);
+    assert.deepEqual(report.hypothesis.momentumPolicy, runtime.momentumPolicy);
+    assert.equal(report.hypothesis.tuningPolicy.primaryArm, 'cost-cap-momentum30');
+    assert.equal(report.hypothesis.tuningPolicy.secondaryArm, 'cost-cap-drop-2c');
+    assert.equal(report.hypothesis.entryFilter, null);
+    assert.match(report.hypothesis.interpretation, /primary_directional_momentum30/);
+    assert.equal(report.sufficientForLive, false);
+    assert.equal(report.automaticPromotion, false);
+    for (const name of runtime.armNames) {
+        assert.equal(report.hypothesis.armCostCaps[name], .82);
+        assert.deepEqual(report.arms[name].researchEligibility, report.commonEntryWindow.arms[name].researchEligibility);
+        assert.equal(report.arms[name].researchEligibility.eligible, false);
+    }
+    const markdown = fs.readFileSync(path.join(directory, runtime.id, 'reports', 'latest.md'), 'utf8');
+    assert.match(markdown, /Hipotesis utama: cost-cap-momentum30/);
+    assert.match(markdown, /return BTC 30 detik/);
+    assert.match(markdown, /Pembanding sekunder cost-cap-drop-2c/);
+    assert.doesNotMatch(markdown, /slot sisa|buffer volatilitas|Dua arm/);
+    const saved = readEntryFilterPaperReports({ dataDir: directory });
+    assert.deepEqual(saved.periodPolicy.momentumPolicy, runtime.momentumPolicy);
+    assert.deepEqual(saved.hypothesis.evaluationPolicy, runtime.evaluationPolicy);
+    const checkpoint = JSON.parse(fs.readFileSync(path.join(directory, runtime.id, 'reports', 'checkpoint-24h.json')));
+    assert.deepEqual(checkpoint.hypothesis.momentumPolicy, runtime.momentumPolicy);
+});
+
+test('momentum paired mean uses resolved opportunity markets rather than passive no-side observations', () => {
+    const runtime = loadEntryFilterPaperConfig({}, '/tmp/momentum-report-cohort-memory-only', LIVE_MOMENTUM_PROFILE);
+    const state = fixture(runtime.id, runtime.armNames);
+    const eligible = snapshot(state, 'eligible');
+    eligible.allowed = [{ index: 0 }]; eligible.passiveCollection = true;
+    fill(state, 'cost-cap-control', eligible.market, 1, { openedAt: eligible.at });
+    fill(state, 'cost-cap-drop-2c', eligible.market, 1, { openedAt: eligible.at });
+    veto(state, 'cost-cap-momentum30', eligible.market);
+    const noSide = snapshot(state, 'no-side');
+    noSide.passiveCollection = true; noSide.allowed = [];
+    const diagnostic = snapshot(state, 'diagnostic');
+    diagnostic.allowed = [{ index: 0 }]; diagnostic.diagnosticOnly = true;
+    const report = summarizeEntryFilterPaper(state, runtime, START + DAY);
+    assert.equal(report.operationalSummary.samples.uniqueObservedMarkets, 3);
+    assert.deepEqual(report.commonEntryWindow.commonCohort.marketIds, ['eligible']);
+    const comparison = report.commonEntryWindow.differences['cost-cap-momentum30'];
+    assert.equal(comparison.matchedMarkets, 1);
+    assert.equal(comparison.tradingDifference, -1);
+    assert.equal(comparison.meanDifference, -1);
+    assert.ok(report.hypothesis.evaluationPolicy.primaryCohortExclusions.includes('no-eligible-side'));
 });
 
 test('cost comparison stops its primary window at first arm stop and excludes later passive evidence', () => {

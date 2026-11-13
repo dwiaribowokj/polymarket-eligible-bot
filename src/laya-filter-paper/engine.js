@@ -175,6 +175,10 @@ export class FilterPaperEngine extends ShadowEngine {
         this.store.event('snapshot', detail);
         this.store.save();
     }
+    recordOpportunitySkip(detail) {
+        this.store.event('opportunity_skipped', detail);
+        this.store.save();
+    }
     async freshSnapshot(market, seconds, rest, validation) {
         const start = this.clock(), slotEnd = market.end - seconds * 1000 + this.config.slotToleranceMs;
         const until = Math.min(slotEnd - (this.config.snapshotSlotReserveMs ?? 100), this.config.deadline - 1);
@@ -273,9 +277,8 @@ export class FilterPaperEngine extends ShadowEngine {
             const allowed = checks.flatMap(check => check.order ? [check.order] : []);
             if (!allowed.length) {
                 slot.status = 'no_valid_side';
-                this.store.event('opportunity_skipped', { slug: market.slug, slot: seconds, slotKey: key,
+                this.recordOpportunitySkip({ slug: market.slug, slot: seconds, slotKey: key,
                     reasons: checks.map(c => c.reason), sideReasons: { UP: checks[0]?.reason, DOWN: checks[1]?.reason } });
-                this.store.save();
                 if (!passiveCollection) return;
             }
             const filterVerdicts = {};

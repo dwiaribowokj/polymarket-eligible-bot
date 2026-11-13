@@ -120,6 +120,19 @@ Jalankan laporan di terminal lain. Gunakan direktori periode baru saat mengganti
 kebijakan, dan pertahankan riwayat periode lama. Stop drawdown riset paper
 tetap 10 pUSD. Hasil paper tidak mengaktifkan atau mengubah live otomatis.
 
+Untuk menguji momentum searah, profil `live-momentum-v1` memakai tiga arm
+dengan cap biaya 0,82 yang sama: kontrol, filter arah BTC 30 detik, dan filter
+penurunan ask sebelum simulasi eksekusi. Gunakan periode baru:
+
+```bash
+node scripts/entry-filter-paper.js preflight --profile=live-momentum-v1 --out="$PWD/data/entry-filter-paper/momentum-001" --smoke
+node scripts/entry-filter-paper.js run --profile=live-momentum-v1 --out="$PWD/data/entry-filter-paper/momentum-001"
+node scripts/entry-filter-paper.js report --out="$PWD/data/entry-filter-paper/momentum-001" --history
+```
+
+Momentum adalah hipotesis utama; filter ask diuji terpisah sebagai pembanding
+sekunder. Hasil historis bukan bukti bahwa keduanya akan memperbaiki live.
+
 `npm start` dan `npm run paper` tetap menjalankan simulasi aturan dasar.
 Rincian profil dan runner riset lain ada di [referensi](docs/reference.md).
 

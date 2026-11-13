@@ -435,6 +435,52 @@ protokol evaluasi yang dicatat sebelum startup. Simpan protokol bertanggal
 serta hasil operasional di catatan deployment privat; semua periode yang
 terkena stop tetap ditautkan dalam riwayat evaluasi.
 
+## Paper momentum 30 detik tanpa AI
+
+Profil `live-momentum-v1` menguji tiga ledger virtual dengan batas estimasi
+biaya penuh 0,82 per share yang sama:
+
+| Arm | Aturan tambahan |
+| --- | --- |
+| `cost-cap-control` | Kontrol pada slot 90/60/30 detik |
+| `cost-cap-momentum30` | Hipotesis utama: return BTC 30 detik >0 untuk UP, <0 untuk DOWN |
+| `cost-cap-drop-2c` | Hipotesis sekunder: tolak bila ask turun >0,02 dari snapshot ke book eksekusi |
+
+Nilai return nol, hilang, non-finite, atau input yang gagal pemeriksaan hash,
+identitas dan waktu ditolak oleh arm momentum. Tidak ada optimasi ambang
+magnitudo atau gabungan kedua filter. Penurunan ask tepat 0,02 tetap boleh;
+harga fill atau hasil market setelah entry tidak menjadi input keputusan.
+
+```bash
+node scripts/entry-filter-paper.js preflight --profile=live-momentum-v1 --out="$PWD/data/entry-filter-paper/momentum-001" --smoke
+node scripts/entry-filter-paper.js run --profile=live-momentum-v1 --out="$PWD/data/entry-filter-paper/momentum-001"
+node scripts/entry-filter-paper.js report --out="$PWD/data/entry-filter-paper/momentum-001" --history
+```
+
+Modal virtual 20 per arm, target 5 shares, cap entry 5, gas/fee, freshness dan
+stop drawdown riset 10 tetap berlaku. Veto admission membolehkan slot berikutnya;
+reservasi order menghabiskan kesempatan market, termasuk saat veto ask-drop
+menolak eksekusinya. Snapshot dan book eksekusi bersama mencegah perbedaan
+waktu antar-arm yang masuk bersamaan. Paper memakai fixed-share depth sweep;
+FAK live dapat memperoleh lebih banyak shares dengan principal yang sama.
+
+Manifest membekukan definisi momentum dan peran primary/secondary sebelum
+startup. Bandingkan net PnL pada cohort market yang sama, winrate profit,
+drawdown, fill rate serta peluang yang dilewatkan. Jangan menganggap data
+observasi yang hilang sebagai return nol. Rata-rata selisih PnL memakai market
+berlabel resmi dengan observasi entry yang layak dan hasil seluruh arm
+lengkap; observasi diagnostik saja, tanpa sisi eligible, serta entry di luar
+jendela bersama dikeluarkan dari denominator. Coverage slot dilaporkan terpisah.
+Target minimum tetap 7 hari aktif
+bersama, 7 hari entry teramati dan 100 fills selesai per arm; penilaian
+berakhir pada stop arm pertama. Hasil tidak cukup bila stop terjadi lebih
+awal. Checkpoint 24 jam hanya memeriksa operasional.
+
+Pertahankan periode dan stop lama; gunakan direktori baru untuk hipotesis
+ini. Pembanding ask-drop tetap eksploratif, bukan pengganti hipotesis utama
+yang gagal. Perlu konfirmasi periode independen berikutnya dengan parameter
+tetap sebelum review live. Tidak ada promosi atau reset otomatis.
+
 ## Paper entry sebelum pembukaan dengan momentum dan AI
 
 Default `premarket-paper` memakai profil `legacy-three-candles-v1` untuk menguji

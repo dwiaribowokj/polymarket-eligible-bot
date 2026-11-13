@@ -5,7 +5,8 @@ import { evaluateEntryFilter } from '../decision-paper/entry-filter.js';
 import { metadataIdentity, validatedStreamBooks, verifyStreamSnapshot } from '../ai-shadow/engine.js';
 import { readEntryFilterRestBooks, validatedEntryFilterRestBooks } from './book-source.js';
 import { calculateFullFillEntryCost } from '../eligible-live/entry-cost-cap.js';
-import { LIVE_TUNING_PROFILE, LIVE_COST_CAP_PROFILE, isLiveTuningProfile } from './config.js';
+import { LIVE_TUNING_PROFILE, LIVE_COST_CAP_PROFILE, LIVE_MOMENTUM_PROFILE, isLiveTuningProfile } from './config.js';
+import { evaluateMomentum30, exactAskDropAboveLimit } from './momentum.js';
 
 const freeze = value => {
     if (value && typeof value === 'object') {
@@ -22,6 +23,7 @@ export class EntryFilterPaperEngine extends FilterPaperEngine {
         this.readRestBooks = options.readRestBooks || readEntryFilterRestBooks;
         this.validateRestBooks = options.validateRestBooks || validatedEntryFilterRestBooks;
         this.observationPairs = new WeakMap(); this.snapshotEvents = new Map();
+        this.opportunityEvents = new Map();
     }
     recoveryEnabled() {
         return this.config.observationPolicy?.restFallback === 'independent-current-book-and-tick-verification';
@@ -110,11 +112,22 @@ export class EntryFilterPaperEngine extends FilterPaperEngine {
         // No external request exists here: snapshot, decision and reservation commit together.
         this.snapshotEvents.set(snapshot.snapshotId, { type: 'snapshot', detail });
     }
+    recordOpportunitySkip(detail) {
+        if (!this.collectWithoutAvailableArms()
+            || !this.recoveryEnabled() && !isLiveTuningProfile(this.config.profile))
+            return super.recordOpportunitySkip(detail);
+        this.opportunityEvents.set(`${detail.slug}:${detail.slot}`, { type: 'opportunity_skipped', detail });
+    }
     async observe(market, seconds, key) {
+        if (this.observing.has(market.slug)) return super.observe(market, seconds, key);
         try { return await super.observe(market, seconds, key); }
         finally {
+            const opportunityKey = `${market.slug}:${seconds}`;
+            const skipped = this.opportunityEvents.get(opportunityKey);
+            this.opportunityEvents.delete(opportunityKey);
             for (const [id, event] of this.snapshotEvents)
                 if (event.detail.slug === market.slug && event.detail.slot === seconds) this.snapshotEvents.delete(id);
+            if (skipped) this.eventBatch([skipped]);
         }
     }
     async executeCohort(key, names) {
@@ -202,7 +215,7 @@ export class EntryFilterPaperEngine extends FilterPaperEngine {
                 metrics = calculateFullFillEntryCost({ price: order?.price, shares: order?.shares,
                     schedule: market.fee, gasUsd: this.config.gasUsd });
             } catch { reason = 'entry_cost_context_unavailable'; }
-            if (this.config.profile === LIVE_COST_CAP_PROFILE) {
+            if ([LIVE_COST_CAP_PROFILE, LIVE_MOMENTUM_PROFILE].includes(this.config.profile)) {
                 for (const name of this.armNames) {
                     const cap = this.config.armCostCaps?.[name];
                     const invalid = !Number.isFinite(cap) || cap <= 0 || cap >= 1;
@@ -210,6 +223,13 @@ export class EntryFilterPaperEngine extends FilterPaperEngine {
                         : metrics.breakEvenProbability > cap ? 'entry_cost_above_cap' : null);
                     verdict[name] = { pass: !rejection, reason: rejection,
                         metrics: metrics ? { ...metrics, costCapPerShare: cap } : null };
+                }
+                if (this.config.profile === LIVE_MOMENTUM_PROFILE) {
+                    const momentum = evaluateMomentum30(snapshot, action, { market, now: this.clock(),
+                        dataAgeMs: this.config.dataAgeMs, policy: this.config.momentumPolicy ?? null });
+                    const cost = verdict['cost-cap-momentum30'];
+                    verdict['cost-cap-momentum30'] = { pass: cost.pass && momentum.pass,
+                        reason: cost.reason || momentum.reason, metrics: cost.metrics, momentum };
                 }
                 continue;
             }
@@ -229,7 +249,8 @@ export class EntryFilterPaperEngine extends FilterPaperEngine {
         const limit = this.config.tuningPolicy.maxAskDropUsd;
         if (![snapshotAsk, executionAsk, limit].every(Number.isFinite) || limit < 0)
             throw new Error('execution_ask_drop_inputs_invalid');
-        const drop = snapshotAsk - executionAsk, pass = drop <= limit + 1e-9;
+        const drop = snapshotAsk - executionAsk, pass = this.config.profile === LIVE_MOMENTUM_PROFILE
+            ? !exactAskDropAboveLimit(snapshotAsk, executionAsk, limit) : drop <= limit + 1e-9;
         return { pass, reason: pass ? null : 'entry_ask_drop_above_limit',
             metrics: { snapshotAsk, executionAsk, askDropUsd: Math.round(drop * 1e9) / 1e9, maxAskDropUsd: limit } };
     }
@@ -257,7 +278,10 @@ export class EntryFilterPaperEngine extends FilterPaperEngine {
             decisionInputAgeMs: inputAge, decisionValidationAgeMs: validationAge });
         const snapshotEvent = this.snapshotEvents.get(snapshot.snapshotId);
         this.snapshotEvents.delete(snapshot.snapshotId);
-        const events = [...(snapshotEvent ? [snapshotEvent] : []),
+        const opportunityKey = `${snapshot.market}:${snapshot.slot}`;
+        const skippedEvent = this.opportunityEvents.get(opportunityKey);
+        this.opportunityEvents.delete(opportunityKey);
+        const events = [...(skippedEvent ? [skippedEvent] : []), ...(snapshotEvent ? [snapshotEvent] : []),
             { type: 'decision', detail: { provider: 'deterministic', shared: true, ...decision } }];
         // Reserve every world before writing so storage latency cannot split execution cohorts.
         for (const name of this.armNames) {
