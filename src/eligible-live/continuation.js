@@ -278,10 +278,11 @@ function validateEntryCostCapAdjustment(config, approval, depth) {
     return continuationProfitTaking(predecessor);
 }
 
-function validateBaseSourceRepair(config, approval) {
+function validateBaseSourceRepair(config, approval, depth, sourceRepairRuntimes) {
     const keys = ['schema', 'runtimeId', 'originalRuntimeId', 'periodId', 'reason',
         'originalManifestSha256', 'fundingSha256', 'ledgerStartedAt', 'wallet', 'dataDir',
         'stateSha256', 'approvedAt'];
+    if (Object.hasOwn(approval, 'sourceRepairMigration')) keys.push('sourceRepairMigration');
     if (Object.keys(approval).length !== keys.length || keys.some(key => !Object.hasOwn(approval, key))
         || approval.schema !== 1 || !ID.test(approval.runtimeId) || !ID.test(approval.originalRuntimeId)
         || approval.periodId !== approval.originalRuntimeId || approval.runtimeId === approval.originalRuntimeId
@@ -295,6 +296,8 @@ function validateBaseSourceRepair(config, approval) {
         || !path.isAbsolute(config.settings.dataDir) || !validSources(config.sources)
         || jsonHash({ policy: config.policy, sources: config.sources,
             profitTaking: config.profitTaking }).slice(0, 16) !== config.runtimeId) fail('approval_mismatch');
+    if (sourceRepairRuntimes.has(config.runtimeId)) fail('source_repair_cycle');
+    const visited = new Set(sourceRepairRuntimes).add(config.runtimeId);
     const dataDir = fs.realpathSync(config.settings.dataDir);
     if (dataDir !== approval.dataDir) fail('unsafe_path');
     const riskRoot = path.join(dataDir, 'eligible-risk-periods');
@@ -315,6 +318,35 @@ function validateBaseSourceRepair(config, approval) {
         || jsonHash({ policy: manifest.policy, sources: manifest.sources,
             profitTaking: manifest.profitTaking }).slice(0, 16) !== approval.originalRuntimeId)
         fail('manifest_mismatch');
+    if (Object.hasOwn(approval, 'sourceRepairMigration')) {
+        const migration = approval.sourceRepairMigration, previous = migration?.previousContinuation;
+        const migrationKeys = ['previousRuntimeId', 'previousManifestSha256',
+            'previousContinuation', 'previousContinuationSha256'];
+        const unchanged = ['schema', 'originalRuntimeId', 'periodId', 'reason',
+            'originalManifestSha256', 'fundingSha256', 'ledgerStartedAt', 'wallet', 'dataDir'];
+        if (!record(migration) || Object.keys(migration).length !== migrationKeys.length
+            || migrationKeys.some(key => !Object.hasOwn(migration, key)) || !record(previous)
+            || !ID.test(migration.previousRuntimeId) || previous.runtimeId !== migration.previousRuntimeId
+            || !HASH.test(migration.previousManifestSha256) || !HASH.test(migration.previousContinuationSha256)
+            || jsonHash(previous) !== migration.previousContinuationSha256
+            || unchanged.some(key => previous[key] !== approval[key])
+            || !Number.isSafeInteger(previous.approvedAt) || previous.approvedAt > approval.approvedAt)
+            fail('source_repair_predecessor_mismatch');
+        if (visited.has(previous.runtimeId)) fail('source_repair_cycle');
+        const previousBytes = readArtifact(dataDir, approval.periodId, 'eligible-runtime',
+            'revisions', previous.runtimeId, 'manifest.json');
+        if (digest(previousBytes) !== migration.previousManifestSha256) fail('source_repair_predecessor_changed');
+        const previousManifest = parse(previousBytes);
+        if (previousManifest.id !== approval.periodId || previousManifest.runtimeId !== previous.runtimeId
+            || previousManifest.startedAt !== approval.ledgerStartedAt || !validSources(previousManifest.sources)
+            || !isDeepStrictEqual(previousManifest.policy, config.policy)
+            || !isDeepStrictEqual(previousManifest.profitTaking, config.profitTaking)
+            || jsonHash({ policy: previousManifest.policy, sources: previousManifest.sources,
+                profitTaking: previousManifest.profitTaking }).slice(0, 16) !== previous.runtimeId)
+            fail('source_repair_predecessor_mismatch');
+        validateContinuation({ ...config, runtimeId: previous.runtimeId,
+            sources: previousManifest.sources }, previous, depth + 1, visited);
+    }
     const ledger = parse(readArtifact(dataDir, approval.periodId, 'pilot', 'late-entry.json'));
     if (ledger.baseline !== approval.periodId || ledger.mode !== 'pilot' || ledger.strategy !== 'late-entry'
         || ledger.decisionProvider !== 'eligible' || ledger.startedAt !== approval.ledgerStartedAt
@@ -326,9 +358,10 @@ function validateBaseSourceRepair(config, approval) {
         riskRuntimeId: approval.originalRuntimeId, runtimeContinuation: deepFreeze(approval) });
 }
 
-function validateContinuation(config, approval, depth = 0) {
-    if (approval.reason === 'base_period_source_repair') return validateBaseSourceRepair(config, approval);
+function validateContinuation(config, approval, depth = 0, sourceRepairRuntimes = new Set()) {
     if (depth > 8) fail('approval_depth');
+    if (approval.reason === 'base_period_source_repair')
+        return validateBaseSourceRepair(config, approval, depth, sourceRepairRuntimes);
     if (approval.schema !== 1 || !ID.test(approval.runtimeId) || !ID.test(approval.originalRuntimeId)
         || !ID.test(approval.periodId) || approval.runtimeId === approval.originalRuntimeId
         || approval.runtimeId !== config.runtimeId

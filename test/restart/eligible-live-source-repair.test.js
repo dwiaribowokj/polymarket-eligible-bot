@@ -75,6 +75,29 @@ function fixture(t) {
         saveApproval, repin, bind: () => bindRiskPeriod(bindRuntimeContinuation(config, env)) };
 }
 
+function advanceSourceRepair(f, at) {
+    const config = f.bind(), next = prepareBaseSourceRepair(f.state, config, at);
+    Object.assign(f.state, next); f.store.save();
+    const manifestFile = eligibleManifestPath(config);
+    atomicJson(manifestFile, { id: config.id, runtimeId: config.runtimeId, policy: config.policy,
+        sources: config.sources, profitTaking: config.profitTaking, startedAt: f.state.startedAt });
+    const previous = structuredClone(f.approval);
+    f.config.sources = [[`src/revision-${at}.js`, digest(String(at))]];
+    f.config.runtimeId = identity(f.config);
+    Object.assign(f.approval, { runtimeId: f.config.runtimeId, stateSha256: jsonHash(f.state),
+        approvedAt: at + 100, sourceRepairMigration: { previousRuntimeId: config.runtimeId,
+            previousManifestSha256: digest(fs.readFileSync(manifestFile)), previousContinuation: previous,
+            previousContinuationSha256: jsonHash(previous) } });
+    f.saveApproval();
+    return manifestFile;
+}
+
+function chainedFixture(t) {
+    const f = fixture(t);
+    f.state.position = null; f.state.entryHolds = {}; f.repin();
+    return { ...f, previousManifestFile: advanceSourceRepair(f, 2100) };
+}
+
 test('base source repair retains the original funded period and does not write during binding', t => {
     const f = fixture(t), before = snapshot(f.dataDir), config = f.bind();
     assert.equal(config.id, f.periodId);
@@ -237,5 +260,143 @@ test('verified configuration cannot be cloned or changed to authorize a differen
         assert.equal(verifiedBaseSourceRepair(config), null);
         assert.throws(() => bindRiskPeriod(config), /eligible_period_missing_pointer/);
         assert.throws(() => prepareBaseSourceRepair(f.state, config, 2100), /eligible_source_repair_unproven/);
+    });
+});
+
+test('successive source repairs preserve funded history and all immutable predecessor manifests', t => {
+    const f = chainedFixture(t), before = structuredClone(f.state), files = snapshot(f.dataDir), config = f.bind();
+    assert.equal(config.id, f.periodId);
+    assert.equal(config.riskPeriod, undefined);
+    assert.deepEqual(snapshot(f.dataDir), files);
+    const next = prepareBaseSourceRepair(f.state, config, 2300);
+    assert.deepEqual(next.continuousOperationHistory.slice(0, -1), before.continuousOperationHistory);
+    assert.deepEqual(next.continuousOperationHistory.at(-1), { ...before.continuousOperation,
+        migratedAt: 2300, nextRuntimeId: config.runtimeId, reasonVerified: 'base_period_source_repair',
+        beforeSha256: f.approval.stateSha256,
+        previousManifestSha256: digest(fs.readFileSync(f.previousManifestFile)) });
+    const restored = structuredClone(next);
+    restored.continuousOperation = before.continuousOperation;
+    restored.continuousOperationHistory = before.continuousOperationHistory;
+    assert.deepEqual(restored, before);
+    assert.equal(initializeContinuousState(config, next, { now: () => 2400 }), false);
+    assert.equal(initializeEligibleStrategyEpoch(next, config, 2400).id, before.currentStrategyEpochId);
+    assert.deepEqual(snapshot(f.dataDir), files);
+    f.store.state = next; f.store.save();
+    next.events++; f.store.save();
+    assert.equal(f.bind().id, f.periodId);
+    assert.throws(() => prepareBaseSourceRepair(next, config, 2400), /eligible_source_repair_unproven/);
+    for (const [name, hash] of files.filter(([name]) => name.endsWith('manifest.json')))
+        assert.equal(digest(fs.readFileSync(path.join(f.dataDir, name))), hash);
+});
+
+test('successive source repair validates every earlier approval and lineage edge', t => {
+    const f = chainedFixture(t);
+    advanceSourceRepair(f, 2300);
+    const next = prepareBaseSourceRepair(f.state, f.bind(), 2500);
+    assert.equal(next.continuousOperationHistory.length, 3);
+    assert.deepEqual(next.continuousOperationHistory.slice(0, -1), f.state.continuousOperationHistory);
+    f.state.continuousOperationHistory[0].beforeSha256 = 'f'.repeat(64); f.repin();
+    assert.throws(() => prepareBaseSourceRepair(f.state, f.bind(), 2500), /eligible_source_repair_unproven/);
+});
+
+test('successive source repairs reject altered predecessors and unsafe revision artifacts', async t => {
+    const cases = {
+        'unknown migration field': f => { f.approval.sourceRepairMigration.clearStop = true; },
+        'missing migration field': f => { delete f.approval.sourceRepairMigration.previousContinuationSha256; },
+        'null migration': f => { f.approval.sourceRepairMigration = null; },
+        'wrong predecessor hash': f => { f.approval.sourceRepairMigration.previousContinuationSha256 = 'f'.repeat(64); },
+        'wrong predecessor manifest hash': f => { f.approval.sourceRepairMigration.previousManifestSha256 = 'f'.repeat(64); },
+        'wrong predecessor runtime': f => { f.approval.sourceRepairMigration.previousRuntimeId = '0123456789abcdef'; },
+        'altered predecessor approval': f => { f.approval.sourceRepairMigration.previousContinuation.approvedAt++; },
+        'backwards approval time': f => { f.approval.approvedAt = 1999; },
+        'changed predecessor manifest': f => { fs.appendFileSync(f.previousManifestFile, '\n'); },
+        'absent predecessor manifest': f => { fs.unlinkSync(f.previousManifestFile); },
+        'predecessor risk namespace': f => { fs.mkdirSync(path.join(f.dataDir, 'eligible-risk-periods',
+            f.approval.sourceRepairMigration.previousRuntimeId), { recursive: true }); },
+        'predecessor manifest symlink': f => {
+            const target = path.join(f.dataDir, 'previous-manifest.json');
+            fs.renameSync(f.previousManifestFile, target); fs.symlinkSync(target, f.previousManifestFile);
+        },
+        'predecessor revision directory symlink': f => {
+            const dir = path.dirname(f.previousManifestFile), target = `${dir}-copy`;
+            fs.renameSync(dir, target); fs.symlinkSync(target, dir);
+        },
+    };
+    for (const [name, change] of Object.entries(cases)) await t.test(name, t => {
+        const f = chainedFixture(t); change(f); f.saveApproval();
+        assert.throws(f.bind, /eligible_continuation_|ENOENT/);
+    });
+    for (const field of ['originalRuntimeId', 'periodId', 'fundingSha256', 'originalManifestSha256',
+        'ledgerStartedAt', 'wallet', 'dataDir', 'reason']) await t.test(`repinned predecessor ${field}`, t => {
+        const f = chainedFixture(t), migration = f.approval.sourceRepairMigration;
+        migration.previousContinuation[field] = field === 'ledgerStartedAt' ? 999 : 'changed';
+        migration.previousContinuationSha256 = jsonHash(migration.previousContinuation); f.saveApproval();
+        assert.throws(f.bind, /eligible_continuation_source_repair_predecessor_mismatch/);
+    });
+    await t.test('repinned predecessor policy', t => {
+        const f = chainedFixture(t), migration = f.approval.sourceRepairMigration;
+        const manifest = JSON.parse(fs.readFileSync(f.previousManifestFile));
+        manifest.policy.entryCap++; atomicJson(f.previousManifestFile, manifest);
+        migration.previousManifestSha256 = digest(fs.readFileSync(f.previousManifestFile)); f.saveApproval();
+        assert.throws(f.bind, /eligible_continuation_source_repair_predecessor_mismatch/);
+    });
+    await t.test('repinned predecessor profit recipient', t => {
+        const f = chainedFixture(t), migration = f.approval.sourceRepairMigration;
+        const manifest = JSON.parse(fs.readFileSync(f.previousManifestFile));
+        manifest.profitTaking.recipient = `0x${'d'.repeat(40)}`; atomicJson(f.previousManifestFile, manifest);
+        migration.previousManifestSha256 = digest(fs.readFileSync(f.previousManifestFile)); f.saveApproval();
+        assert.throws(f.bind, /eligible_continuation_source_repair_predecessor_mismatch/);
+    });
+});
+
+test('successive source repairs require exact reviewed state and unaltered prior lineage', async t => {
+    const cases = {
+        'missing lineage': f => { delete f.state.continuousOperationHistory; },
+        'extra lineage': f => { f.state.continuousOperationHistory.push({ ...f.state.continuousOperationHistory[0] }); },
+        'null lineage row': f => { f.state.continuousOperationHistory[0] = null; },
+        'wrong current runtime': f => { f.state.continuousOperation.runtimeId = f.periodId; },
+        'changed enablement time': f => { f.state.continuousOperation.enabledAt++; },
+        'migration before prior approval': f => { f.state.continuousOperationHistory[0].migratedAt = 1999; },
+        'migration after current approval': f => { f.state.continuousOperationHistory[0].migratedAt = 2201; },
+        'wrong history predecessor': f => { f.state.continuousOperationHistory[0].runtimeId = '0123456789abcdef'; },
+        'wrong history destination': f => { f.state.continuousOperationHistory[0].nextRuntimeId = '0123456789abcdef'; },
+        'wrong history manifest': f => { f.state.continuousOperationHistory[0].previousManifestSha256 = 'f'.repeat(64); },
+        'wrong history state': f => { f.state.continuousOperationHistory[0].beforeSha256 = 'f'.repeat(64); },
+        'wrong history reason': f => { f.state.continuousOperationHistory[0].reasonVerified = 'manual_reset'; },
+        'unknown lineage field': f => { f.state.continuousOperationHistory[0].clearStop = true; },
+        'risk stop': f => { f.state.liveRiskStop = { reason: 'drawdown_limit', at: 2150 }; },
+        'frozen ledger': f => { f.state.frozenAt = 2150; },
+        'pending provider': f => { f.state.ai.providers.eligible.pending = { id: 'pending' }; },
+        'pending withdrawal': f => { f.state.profitTakingControl = { operation: { stage: 'address_ready' } }; },
+    };
+    for (const [name, change] of Object.entries(cases)) await t.test(name, t => {
+        const f = chainedFixture(t); change(f); f.repin();
+        const before = structuredClone(f.state), config = f.bind();
+        assert.throws(() => prepareBaseSourceRepair(f.state, config, 2300), /eligible_source_repair_unproven/);
+        assert.deepEqual(f.state, before);
+    });
+    await t.test('state changed after approval', t => {
+        const f = chainedFixture(t), config = f.bind(); f.state.events++;
+        assert.throws(() => prepareBaseSourceRepair(f.state, config, 2300), /eligible_source_repair_unproven/);
+    });
+    await t.test('latched operational stop remains intact', t => {
+        const f = chainedFixture(t); f.state.stopped = { reason: 'operational_check_failed', at: 2150 }; f.repin();
+        assert.deepEqual(prepareBaseSourceRepair(f.state, f.bind(), 2300).stopped, f.state.stopped);
+    });
+});
+
+test('source repair chains reject repeated runtimes and excessive predecessor depth', async t => {
+    await t.test('repeated runtime', t => {
+        const f = chainedFixture(t), first = structuredClone(f.approval.sourceRepairMigration.previousContinuation);
+        advanceSourceRepair(f, 2300);
+        const earlier = JSON.parse(fs.readFileSync(f.previousManifestFile));
+        f.config.sources = earlier.sources; f.config.runtimeId = first.runtimeId;
+        f.approval.runtimeId = first.runtimeId; f.saveApproval();
+        assert.throws(f.bind, /eligible_continuation_source_repair_cycle/);
+    });
+    await t.test('depth limit', t => {
+        const f = fixture(t);
+        for (let index = 0; index < 9; index++) advanceSourceRepair(f, 2100 + index * 200);
+        assert.throws(f.bind, /eligible_continuation_approval_depth/);
     });
 });

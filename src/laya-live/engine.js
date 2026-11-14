@@ -497,15 +497,44 @@ export class LayaLiveEngine extends MaintenanceEngine {
         const preparationTiming = { startedAt: Date.now(), deadlineAt: slotEnd };
         if (this.ai?.slots?.[key]) this.ai.slots[key].preparationTiming = preparationTiming;
         if (this.closed || state.stopped || preparationTiming.startedAt > slotEnd) throw new Error('slot_late_after_validation');
+        // Eligible decisions are local. Read a fresh wallet while collecting
+        // market data, then drain it before the next tick can move the RPC anchor.
+        const walletRead = decisionProvider(this.config) === 'eligible' ? this.startEntryWallet(market) : null;
+        try {
+            return await this.observeEntry(market, seconds, key, { generation, slotEnd, preparationTiming, walletRead });
+        } finally {
+            if (walletRead) {
+                const result = await walletRead.result;
+                // A discarded market observation must not hide a wallet or chain identity fault.
+                if (result.status === 'rejected' && !temporaryReadFailure(result.reason)
+                    && result.reason?.category !== 'opportunity' && !decisionExpired(operationCode(result.reason)))
+                    throw result.reason;
+            }
+        }
+    }
+    startEntryWallet(market) {
+        const startedAt = performance.now(), read = {};
+        read.result = Promise.resolve().then(() => this.broker.entryWallet(market)).then(
+            value => ({ status: 'fulfilled', value }), reason => ({ status: 'rejected', reason }),
+        ).then(result => {
+            read.elapsedMs = Math.max(0, performance.now() - startedAt);
+            return result;
+        });
+        return read;
+    }
+    async observeEntry(market, seconds, key, { generation, slotEnd, preparationTiming, walletRead }) {
+        const state = this.store.state;
         const timed = async (name, task) => {
             const startedAt = performance.now();
             try { return await task(); }
             finally { preparationTiming[`${name}Ms`] = Math.max(0, performance.now() - startedAt); }
         };
-        const [rest] = await Promise.all([
+        const preparationResults = await Promise.allSettled([
             timed('rest', () => this.entryBooks(market, { deadline: slotEnd })),
             timed('metadata', () => this.entryMetadata(market)),
         ]);
+        for (const result of preparationResults) if (result.status === 'rejected') throw result.reason;
+        const rest = preparationResults[0].value;
         this.assertEntryClock();
         // Fee and token identity are checked again at the decision snapshot,
         // rather than relying on the metadata read at market opening.
@@ -588,9 +617,13 @@ export class LayaLiveEngine extends MaintenanceEngine {
         });
         // Both RPC values use ONE confirmed block. Metadata warmup stops at
         // the SDK's unsigned step; neither task reserves or submits an order.
-        const walletStartedAt = performance.now();
-        const walletTask = Promise.resolve(this.broker.entryWallet(market)).finally(() => {
-            snapshot.walletReadMs = Math.max(0, performance.now() - walletStartedAt);
+        const walletWaitStartedAt = performance.now();
+        walletRead ||= this.startEntryWallet(market);
+        const walletTask = walletRead.result.then(result => {
+            snapshot.walletReadMs = walletRead.elapsedMs;
+            snapshot.walletWaitMs = Math.max(0, performance.now() - walletWaitStartedAt);
+            if (result.status === 'rejected') throw result.reason;
+            return result.value;
         });
         const [decisionResult, walletResult, metadataResult] = await Promise.allSettled([
             decisionTask, walletTask, metadataTask,
@@ -602,7 +635,7 @@ export class LayaLiveEngine extends MaintenanceEngine {
         this.store.event('laya_decision', { ...decision, evaluationEpochId: snapshot.evaluationEpochId,
             ...(snapshot.strategyEpochId ? { strategyEpochId: snapshot.strategyEpochId } : {}), preparationTiming: {
             snapshotPersistMs: snapshot.snapshotPersistMs, walletReadMs: snapshot.walletReadMs,
-            metadataWarmupMs: snapshot.metadataWarmupMs,
+            walletWaitMs: snapshot.walletWaitMs, metadataWarmupMs: snapshot.metadataWarmupMs,
         } });
         const disposition = reason => {
             snapshot.entryDisposition = reason;

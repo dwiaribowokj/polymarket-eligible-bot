@@ -6,12 +6,14 @@ import { LayaLiveEngine, entryGuard, initializeAI } from '../../src/laya-live/en
 import { LiveSupervisor } from '../../src/laya-live/runner.js';
 import { ShadowEngine } from '../../src/ai-shadow/engine.js';
 import { marketSlug } from '../../src/restart/strategy.js';
+import { OperationalError } from '../../src/restart/network.js';
 
 const start = Date.parse('2026-10-16T00:04:00Z');
 
 function fixture(t, options = {}) {
     let now = start;
     t.mock.method(Date, 'now', () => now);
+    t.mock.method(performance, 'now', () => now - start);
     t.mock.method(globalThis, 'fetch', () => { throw new Error('network_forbidden_in_eligible_fixture'); });
     const settings = { pilotHours: 48, maxDataAgeMs: 5000, shares: 5, entryCap: 5,
         late: { duration: 300 }, lateQuality: { maxSpread: .03, minDepth: 5 } };
@@ -39,14 +41,22 @@ function fixture(t, options = {}) {
         completed: [], seen: {}, stopped: null, position: null };
     const events = [], persisted = [];
     const store = { state, save() { persisted.push(structuredClone(state)); },
-        event(type, detail = {}) { events.push({ type, ...detail, at: now }); this.save(); },
+        event(type, detail = {}) {
+            events.push({ type, ...detail, at: now }); this.save();
+            if (['laya_snapshot', 'laya_decision'].includes(type)) now += options.persistMs ?? 0;
+        },
         stop(reason) { state.stopped ||= { reason, at: now }; this.save(); } };
     const orderId = `0x${'e'.repeat(64)}`, signed = { fixtureOnly: true, orderType: 'FAK' };
     const client = {
         btc: { assess: t.mock.fn(() => ({ reason: options.signalReason ?? null })) },
-        books: t.mock.fn(async () => bookRows()), marketInfo: t.mock.fn(async () => ({})), validateInfo: t.mock.fn(),
-        confirmedBlock: t.mock.fn(async () => 123), balance: t.mock.fn(async () => options.balance ?? 20),
-        holdings: t.mock.fn(async () => options.holdings ?? [0, 0]),
+        books: t.mock.fn(async () => { await options.restGate; return bookRows(); }),
+        marketInfo: t.mock.fn(async () => ({})), validateInfo: t.mock.fn(),
+        confirmedBlock: t.mock.fn(async () => 123), balance: t.mock.fn(async () => {
+            await options.walletGate;
+            if (options.walletError) throw options.walletError;
+            return options.balance ?? 20;
+        }),
+        holdings: t.mock.fn(async () => { await options.walletGate; return options.holdings ?? [0, 0]; }),
         warmOrderMetadata: t.mock.fn(async () => { now += options.walletDelayMs ?? 0; }),
         prepare: t.mock.fn(async spec => {
             assert.ok(now >= start + 250); assert.equal(spec.shares, 5); assert.equal(spec.price, .78);
@@ -81,7 +91,7 @@ function fixture(t, options = {}) {
         assert.equal(state.position, null); assert.deepEqual(state.seen, {});
         assert.equal(client.prepare.mock.callCount(), 0); assert.equal(client.post.mock.callCount(), 0);
         waits.push({ at: now, until: snapshot.decisionReceivedAt + 250 });
-        now = snapshot.decisionReceivedAt + (options.executionDelayMs ?? 250);
+        now = Math.max(now, snapshot.decisionReceivedAt + (options.executionDelayMs ?? 250));
         options.onWait?.({ setAsk, state, rows, stream });
     });
     return { engine, providers, predict, config, state, market, client, stream, store, events, persisted, waits,
@@ -148,6 +158,105 @@ test('eligible skips ambiguous and empty candidate sets without reserving a mark
             assert.equal(f.state.ai.snapshots[0].entryDisposition, 'eligible_skip');
         } else assert.equal(Object.values(f.state.ai.slots)[0].status, 'no_valid_side');
     });
+});
+
+test('eligible overlaps a fresh pinned wallet with market preparation and durable snapshot writes', async t => {
+    const rest = Promise.withResolvers(), wallet = Promise.withResolvers();
+    const f = fixture(t, { restGate: rest.promise, walletGate: wallet.promise, inputAgeMs: 1100, persistMs: 400 });
+    const pending = f.engine.discover(start);
+    t.after(async () => { rest.resolve(); wallet.resolve(); await pending; });
+    await nextTurn();
+    assert.equal(f.client.confirmedBlock.mock.callCount(), 1);
+    assert.equal(f.client.balance.mock.callCount(), 1);
+    assert.equal(f.client.holdings.mock.callCount(), 1);
+    assert.equal(f.state.ai.snapshots.length, 0);
+    assert.equal(f.client.prepare.mock.callCount(), 0);
+    f.setTime(start + 1500); rest.resolve();
+    await nextTurn();
+    const snapshot = f.state.ai.snapshots[0];
+    assert.equal(snapshot.at, start + 1500);
+    assert.equal(snapshot.snapshotPersistMs, 400);
+    assert.equal(f.client.prepare.mock.callCount(), 0);
+    f.setTime(start + 2200); wallet.resolve();
+    await pending;
+    assert.equal(snapshot.entryDisposition, 'order_accepted');
+    assert.equal(snapshot.wallet.startedAt, start);
+    assert.equal(snapshot.wallet.checkedAt, start + 2200);
+    assert.equal(snapshot.wallet.block, 123);
+    assert.equal(snapshot.walletReadMs, 2200);
+    assert.equal(snapshot.walletWaitMs, 300);
+    assert.equal(f.state.position.openedAt, start + 2600);
+    assert.equal(f.client.post.mock.callCount(), 1);
+    assert.equal(f.config.ai.dataAgeMs, 5000);
+    assert.equal(f.state.position.orders[0].price, .78);
+    assert.equal(f.state.position.orders[0].shares, 5);
+    assert.equal(f.client.balance.mock.calls[0].arguments[0], 123);
+    assert.equal(f.client.holdings.mock.calls[0].arguments[1], 123);
+});
+
+test('eligible drains the wallet on discarded observations before another tick can use the RPC anchor', async t => {
+    for (const reason of ['no_valid_side', 'preparation_failed', 'metadata_failed', 'engine_closed'])
+        for (const failWallet of [false, true]) await t.test(`${reason}, wallet failure ${failWallet}`, async t => {
+            const rest = Promise.withResolvers(), wallet = Promise.withResolvers();
+            const f = fixture(t, { restGate: rest.promise, walletGate: wallet.promise,
+                noAllowed: reason === 'no_valid_side',
+                ...(failWallet ? { walletError: new OperationalError('read_timeout', 'timeout') } : {}) });
+            if (reason === 'preparation_failed') t.mock.method(f.client, 'books', async () => {
+                await rest.promise; throw new OperationalError('read_timeout', 'timeout');
+            });
+            if (reason === 'metadata_failed') t.mock.method(f.client, 'marketInfo', async () => {
+                throw new OperationalError('read_timeout', 'timeout');
+            });
+            let finished = false;
+            const pending = f.engine.discover(start).finally(() => { finished = true; });
+            t.after(async () => { rest.resolve(); wallet.resolve(); await pending; });
+            await nextTurn();
+            assert.equal(f.client.balance.mock.callCount(), 1);
+            if (reason === 'engine_closed') f.engine.closed = true;
+            rest.resolve(); await nextTurn();
+            assert.equal(finished, false, 'discarding market data must still drain the pinned wallet reads');
+            assert.equal(f.client.post.mock.callCount(), 0);
+            wallet.resolve(); await pending;
+            assert.equal(finished, true);
+            assert.equal(f.state.position, null);
+            assert.deepEqual(f.state.seen, {});
+            assert.equal(f.client.prepare.mock.callCount(), 0);
+            assert.equal(f.client.post.mock.callCount(), 0);
+        });
+});
+
+test('prefetched wallet proof keeps its original age and expires without preparing an order', async t => {
+    const wallet = Promise.withResolvers();
+    const f = fixture(t, { walletGate: wallet.promise });
+    const pending = f.engine.discover(start);
+    t.after(async () => { wallet.resolve(); await pending; });
+    await nextTurn();
+    f.setTime(start + 5001); wallet.resolve(); await pending;
+    assert.equal(f.state.ai.snapshots[0].entryDisposition, 'entry_wallet_expired');
+    assert.equal(f.client.confirmedBlock.mock.callCount(), 1);
+    assert.equal(f.client.prepare.mock.callCount(), 0);
+    assert.equal(f.client.post.mock.callCount(), 0);
+    assert.equal(f.state.position, null);
+});
+
+test('discarded market data cannot hide a concurrent wallet identity failure', async t => {
+    for (const code of ['rpc_wrong_chain', 'rpc_block_mismatch', 'entry_wallet_invalid'])
+        for (const failedPreparation of [false, true]) await t.test(`${code}, preparation failure ${failedPreparation}`, async t => {
+            const wallet = Promise.withResolvers();
+            const f = fixture(t, { noAllowed: true, walletGate: wallet.promise,
+                walletError: new OperationalError(code, 'validation', { stage: 'wallet_read' }) });
+            if (failedPreparation) t.mock.method(f.client, 'books', async () => {
+                throw new OperationalError('read_timeout', 'timeout');
+            });
+            const pending = f.engine.discover(start);
+            t.after(async () => { wallet.resolve(); await pending; });
+            await nextTurn(); wallet.resolve(); await pending;
+            assert.equal(f.state.stopped?.reason, 'operational_check_failed');
+            assert.ok(f.events.some(row => row.type === 'laya_snapshot_skipped' && row.reason === code));
+            assert.equal(f.client.prepare.mock.callCount(), 0);
+            assert.equal(f.client.post.mock.callCount(), 0);
+            assert.equal(f.state.position, null);
+        });
 });
 
 test('eligible rechecks the current book after the minimum latency and retains the original limit', async t => {
