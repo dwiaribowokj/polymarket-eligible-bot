@@ -856,3 +856,74 @@ ledger, serta laporannya sebelum pindah. Arsip early lama tetap dilaporkan menur
 kebijakan aslinya, terpisah dari periode REST baru; hasilnya tidak digabung sebagai
 satu eksperimen. Parameter strategi, input 30 candle, dan budget AI 30 detik tetap
 tercatat di manifest setiap periode.
+
+## Collector nilai/harga BTC 5 menit
+
+`scripts/value-collector.js` mengumpulkan data untuk riset probabilitas settlement
+dan biaya entry. Collector memakai API baca yang sama dengan paper, tanpa
+simulasi posisi, inference, order, redeem, atau penarikan. Autentikasi signer
+dipakai untuk akses feed Chainlink melalui Polybolt. Strategi live tetap
+berbasis aturan; menjalankan collector tidak mengganti strategi live.
+
+```bash
+node scripts/value-collector.js preflight --out="$PWD/data/value-collector/period-001"
+node scripts/value-collector.js run --out="$PWD/data/value-collector/period-001"
+node scripts/value-collector.js report --out="$PWD/data/value-collector/period-001"
+```
+
+Node.js 24 dan konfigurasi feed/RPC dari environment proses atau `.env` diperlukan.
+Template service terpisah tersedia di `deploy/polymarket-value-collector.service`.
+Sesuaikan path Node, runtime, environment privat, serta output sebelum memasangnya.
+Collector ini tidak membaca konfigurasi live secara otomatis. Estimasi gas memakai
+`RESTART_PAPER_GAS_USD` yang sudah ada; template rahasia tambahan tidak diperlukan.
+
+Setiap market dijadwalkan pada sisa 270, 240, 210, 180, 150, 120, 90, 75, 60, 50,
+40, 30, 20, 15, 10, dan 5 detik. Toleransi mulai dua detik dan budget capture tiga
+detik; waktu snapshot sebenarnya tetap dicatat, bukan diganti waktu jadwal.
+Tidak ada filter favorit, arah, rentang harga, posisi aktif, atau batas risiko
+paper lama yang menentukan pencatatan. Kedua sisi selalu dinilai. Slot terlewat,
+market tidak tersedia, warming, clock gagal, dan data tidak valid tetap tercatat
+sebagai `missed` atau `partial`.
+
+Snapshot menyimpan sumber dan waktu penerimaan harga spot, TWAP 60 detik,
+opening boundary, full depth UP/DOWN, serta bukti verifikasi REST. Data yang belum
+diterima pada snapshot tidak masuk fitur. Integral closing memakai satu cutoff:
+timestamp spot kausal terakhir. Pengujian rolling TWAP memakai timestamp TWAP-nya
+sendiri dan ditandai terpisah. Opening yang tidak teramati tepat waktu tidak
+direkonstruksi menggunakan settlement masa depan. Warmup memerlukan history
+180 detik dan opening boundary baru, sehingga snapshot awal dapat `partial`.
+
+Quote untuk 5, 10, dan 20 shares menghitung biaya berdasarkan ask depth yang
+terlihat, fee taker, dan asumsi gas. Depth tidak cukup menghasilkan biaya penuh
+`null`; quote bukan jaminan fill. Spread, harga mahal, dan sisi tanpa asks tetap
+berguna sebagai data. Nilai gas adalah asumsi, bukan biaya on-chain yang diukur.
+
+Timestamp exchange dapat berarti perubahan book terakhir, berbeda dari waktu
+verifikasi REST saat ini. Collector menyimpan usia tersebut secara eksplisit,
+termasuk book yang belum berubah dalam lima detik. Receipt, HTTP cache, metadata,
+identitas, serta tick tetap diverifikasi; timestamp masa depan ditolak. Kebijakan
+pengumpulan ini tidak mengubah guard eksekusi live.
+
+Output privat berisi manifest policy/source, checkpoint kecil `state.json`,
+observasi immutable per slot dalam `observations/`, serta label terpisah dalam
+`labels/`. Label berasal dari payout CTF resmi pada block terkonfirmasi, termasuk
+hasil split; belum resolved tetap pending dan dicoba ulang. Tidak ada label
+prediksi dari arah spot atau TWAP. Hash fitur mengikat isi snapshot. Restart
+merekonstruksi coverage dari file durable, menolak perubahan manifest dan konflik
+isi; perubahan policy/source memerlukan periode baru. Jangan gabungkan periode
+yang berbeda sebagai satu eksperimen atau masukkan file output ke Git.
+
+Storage dibatasi 4 GiB untuk record immutable dan menyisakan minimal 2 GiB ruang
+filesystem. Saat batas tercapai, collector berhenti dengan exit 78; service tidak
+mengulang startup otomatis untuk kode ini. Data tidak dihapus. Periksa kapasitas
+dan arsipkan ke penyimpanan lain sebelum memulai periode baru.
+
+Data ini adalah discovery, belum bukti peningkatan win rate. Mulai evaluasi
+coverage setelah sedikitnya tujuh hari penuh dan 1.000 market berlabel; durasi
+itu juga bukan bukti strategi untung. Laporkan missingness menurut slot, sisi,
+harga, dan waktu. Semua slot dari satu market harus berada dalam partisi yang
+sama; pemisahan training/calibration/evaluation harus kronologis. Setelah model
+dan kriteria entry dibekukan, kumpulkan periode masa depan yang belum dipakai
+untuk fitting atau memilih threshold. Bandingkan kalibrasi, Brier score, biaya
+eksekusi, coverage, dan drawdown, bukan win rate saja. Tidak ada training atau
+promosi ke live otomatis.
