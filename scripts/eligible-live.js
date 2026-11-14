@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { Store, acquireLock, atomicJson } from '../src/restart/store.js';
+import { acquireLock, atomicJson } from '../src/restart/store.js';
+import { LiveStore as Store } from '../src/laya-live/store.js';
 import { pilotSummary } from '../src/restart/math.js';
 import { LayaTradingClient } from '../src/laya-live/client.js';
 import { LiveBookHistory } from '../src/laya-live/book-history.js';

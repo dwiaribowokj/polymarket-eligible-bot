@@ -3,7 +3,8 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { atomicJson, Store } from '../../src/restart/store.js';
+import { atomicJson } from '../../src/restart/store.js';
+import { LiveStore as Store } from '../../src/laya-live/store.js';
 
 function fixture(t, mode = 'pilot') {
     const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'store-durability-'));

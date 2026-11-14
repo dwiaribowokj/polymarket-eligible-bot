@@ -3,11 +3,11 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { spawn } from 'node:child_process';
 
-export function atomicJson(filename, data, { compact = false } = {}) {
+export function atomicJson(filename, data) {
     fs.mkdirSync(path.dirname(filename), { recursive: true, mode: 0o700 });
     const tmp = `${filename}.${process.pid}.${crypto.randomUUID()}.tmp`;
     const fd = fs.openSync(tmp, 'wx', 0o600);
-    try { fs.writeFileSync(fd, JSON.stringify(data, null, compact ? undefined : 2)); fs.fsyncSync(fd); }
+    try { fs.writeFileSync(fd, JSON.stringify(data, null, 2)); fs.fsyncSync(fd); }
     finally { fs.closeSync(fd); }
     fs.renameSync(tmp, filename);
     const dir = fs.openSync(path.dirname(filename), 'r');
@@ -34,7 +34,7 @@ export class Store {
                 failures: 0, dataGaps: 0, walletStart: null, legacyPositions: [], events: 0 };
         }
     }
-    save() { atomicJson(this.filename, this.state, { compact: this.state.mode === 'pilot' }); }
+    save() { atomicJson(this.filename, this.state); }
     event(type, detail = {}) {
         const row = { at: new Date().toISOString(), strategy: this.state.strategy, mode: this.state.mode,
             baseline: this.state.baseline, type, ...detail };
