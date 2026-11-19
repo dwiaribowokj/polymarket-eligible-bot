@@ -927,3 +927,32 @@ dan kriteria entry dibekukan, kumpulkan periode masa depan yang belum dipakai
 untuk fitting atau memilih threshold. Bandingkan kalibrasi, Brier score, biaya
 eksekusi, coverage, dan drawdown, bukan win rate saja. Tidak ada training atau
 promosi ke live otomatis.
+
+### Paper perbandingan waktu eksekusi dua versi
+
+Jalankan dengan Node 24: `node scripts/paired-version-paper/runner.mjs check /path/config.json`
+untuk memverifikasi pin, `run` untuk paper, dan `report` untuk hasil terkini. Konfigurasi privat berisi
+`output` (direktori khusus paper), `startAt` (epoch ms), `ledger` (sumber hanya-baca), `collector`
+(direktori pengamat nilai BTC), dua berkas kalibrasi `persistCalibration` / `submitCalibration`, dan
+`arms.old` / `arms.new` dengan `root` dan `manifestPath` absolut. `protocol` membekukan schema 1,
+sourceHash runner (ekspor `sourceHash()`), SHA-256 manifest collector dan kalibrasi, collectorId,
+periodId, epochId, liveRuntimeId, serta commit, runtimeId dan manifestSha256 kedua arm. Pin sumber dan
+pengaturan sebelum mulai; perubahan memerlukan direktori eksperimen baru. Gunakan direktori runtime
+terisolasi tanpa file env, kredensial atau signer.
+
+Perbandingan ini berlaku pada snapshot BTC 5 menit yang benar-benar diproduksi sumber bersama.
+Kedua provider membaca input dan waktu tahap yang sama. Lama baca wallet, persiapan metadata, dan
+penulisan ledger menentukan estimasi waktu periksa dan siap kirim masing-masing versi. Rasio waktu
+simpan berasal dari benchmark store lama/baru pada state identik sebelum periode. Waktu signing dan
+jarak pemeriksaan terakhir ke pencatatan submit memakai median percobaan historis yang sudah selesai
+diukur sebelum periode. Tidak ada signing, pengiriman order, atau perkiraan antrean exchange.
+Kuantitas yang terlihat pada buku pertama saat atau setelah waktu estimasi dipakai untuk simulasi FAK;
+selisih sampel dibatasi 300 ms. Kekurangan data pada salah satu versi mengecualikan slot untuk keduanya.
+Slot yang tidak menghasilkan snapshot sumber juga dicatat, bukan dianggap trade atau laba nol.
+
+Cash virtual 20 pUSD per versi; fee sesuai market, asumsi gas 0.05 per fill, dan label payout resmi
+dengan identitas token terverifikasi. Stop bersama saat drawdown berdasarkan settlement salah satu
+versi mencapai 10 pUSD; posisi yang sudah ada tetap dihitung saat label tersedia. Bacalah jumlah
+slot yang dapat dibandingkan, fill, PnL neto, dan drawdown bersama. Tujuh hari bersama dan 100 trade
+selesai per versi hanya minimum untuk review; model ini tidak mereproduksi seluruh bot lama, order
+yang tak pernah dikirim, kegagalan broker historis, atau keuntungan aktual. Tidak ada promosi live otomatis.
