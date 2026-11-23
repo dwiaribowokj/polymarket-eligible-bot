@@ -1,0 +1,21 @@
+[Unit]
+Description=Polymarket BTC 5m strategy candidates paper runner (virtual only)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/polymarket-eligible-bot
+EnvironmentFile=-%h/.config/polymarket-value-collector.env
+ExecStart=/usr/bin/node --disable-warning=ExperimentalWarning scripts/strategy-candidates-paper/runner.mjs run --out=/opt/polymarket-eligible-bot/data/strategy-candidates-paper/period-001
+Restart=on-failure
+RestartSec=15
+TimeoutStopSec=30
+UMask=0077
+NoNewPrivileges=true
+Nice=8
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target

@@ -38,6 +38,7 @@ export function publishable(file) {
         || file === 'deploy/polymarket-premarket-paper.service'
         || file === 'deploy/polymarket-market-history.service'
         || file === 'deploy/polymarket-value-collector.service'
+        || file === 'deploy/polymarket-strategy-candidates-paper.service'
         || /^\.githooks\/(?:pre-commit|pre-push)$/.test(file);
 }
 
