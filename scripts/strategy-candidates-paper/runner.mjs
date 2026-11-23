@@ -375,19 +375,21 @@ export class StrategyCandidatesEngine {
 
     async tick() {
         if (this.closed) return;
-        const now = this.clock();
+        const startNow = this.clock();
         this.client.startBtcFeed();
         this.binance.start();
         this.trades.reconnect();
-        await this.discoverMarket(now);
+        await this.discoverMarket(startNow);
+        const now = this.clock();
         this._processMakerTrades(now);
         this._manageOpenMakers(now);
         this._executePendingTakers(now);
         this._evaluateSlots(now);
-        await this._resolveSettlements(now);
-        if (now - this.lastReportAt >= 15000) {
-            this.lastReportAt = now;
-            this.writeReport(now);
+        await this._resolveSettlements(this.clock());
+        const reportNow = this.clock();
+        if (reportNow - this.lastReportAt >= 15000) {
+            this.lastReportAt = reportNow;
+            this.writeReport(reportNow);
         }
     }
 
