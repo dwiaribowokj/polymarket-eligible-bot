@@ -1,6 +1,6 @@
 import { EPS, fee, round, sweep } from '../../src/restart/math.js';
 
-export const PROTOCOL_VERSION = 'strategy-candidates-v1';
+export const PROTOCOL_VERSION = 'strategy-candidates-v2';
 export const SLOTS = Object.freeze([90, 60, 30]);
 export const SHARES = 5;
 export const GAS_USD = 0.05;
@@ -10,12 +10,12 @@ export const DRAWDOWN_STOP = 10;
 export const MIN_EVAL_DAYS = 7;
 export const MIN_EVAL_COMPLETED = 100;
 
-export const HIGH_VOL_SIGMA_USD = 3.39;
 export const MIN_BOOK_IMBALANCE = -0.2;
+export const MAX_MAKER_QUEUE_SHARES = 100;
 export const LEAD_VETO_LOOKBACK_MS = 5000;
-export const LEAD_VETO_BPS = 1.5;
+export const LEAD_VETO_BPS = 2.0;
 export const ADVERSE_CANCEL_LOOKBACK_MS = 3000;
-export const ADVERSE_CANCEL_BPS = 2.0;
+export const ADVERSE_CANCEL_BPS = 7.0;
 
 export const ARM_DEFS = Object.freeze([
     Object.freeze({
@@ -26,42 +26,39 @@ export const ARM_DEFS = Object.freeze([
         shares: SHARES,
     }),
     Object.freeze({
-        name: 'contrarian_dog_60_taker',
-        description: 'Underdog 0.15-0.45 at slot 60s, taker',
-        slots: [60],
+        name: 'fav_leadveto_taker',
+        description: 'Baseline fav [90,60,30] + Binance 5s lead-veto (-2bps), taker',
+        slots: [90, 60, 30],
         execution: 'taker',
         shares: SHARES,
     }),
     Object.freeze({
-        name: 'contrarian_dog_60_maker',
-        description: 'Underdog 0.15-0.45 at slot 60s, maker post-only @ bestBid (0% fee, cancel @15s)',
-        slots: [60],
+        name: 'fav_90_60_imb_lead_taker',
+        description: 'Fav [90,60] (no slot 30) + non-ask-heavy (imb3>=-0.2) + Binance lead-veto, taker',
+        slots: [90, 60],
+        execution: 'taker',
+        shares: SHARES,
+    }),
+    Object.freeze({
+        name: 'fav_90_only_lead_taker',
+        description: 'Fav slot 90 ONLY + Binance lead-veto (-2bps), taker',
+        slots: [90],
+        execution: 'taker',
+        shares: SHARES,
+    }),
+    Object.freeze({
+        name: 'fav_smart_maker',
+        description: 'Fav [90,60] + Binance lead-veto, smart post-only maker (penny-jump if spread>=2c else queue<=100, 0% fee, 7bps adverse cancel)',
+        slots: [90, 60],
         execution: 'maker',
         shares: SHARES,
         cancelAtRemainingSec: 15,
-        adverseCancelBps: null,
-        adverseLookbackMs: null,
-    }),
-    Object.freeze({
-        name: 'fav_90_filtered_taker',
-        description: 'Fav 0.70-0.82 at slot 90s + high-vol + non-ask-heavy + Binance lead-veto, taker',
-        slots: [90],
-        execution: 'taker',
-        shares: SHARES,
-    }),
-    Object.freeze({
-        name: 'fav_90_filtered_maker',
-        description: 'Fav 0.70-0.82 at slot 90s + high-vol + non-ask-heavy + Binance lead-veto, maker @ bestBid + adverse cancel',
-        slots: [90],
-        execution: 'maker',
-        shares: SHARES,
-        cancelAtRemainingSec: 20,
         adverseCancelBps: ADVERSE_CANCEL_BPS,
         adverseLookbackMs: ADVERSE_CANCEL_LOOKBACK_MS,
     }),
     Object.freeze({
-        name: 'late_lock_60_maker',
-        description: 'Extreme fav 0.90-0.98 at slot 60s + Binance lead-veto, maker @ bestBid + adverse cancel',
+        name: 'late_lock_60_smart_maker',
+        description: 'Extreme fav 0.90-0.98 at slot 60s + Binance lead-veto, smart post-only maker (0% fee, 7bps adverse cancel)',
         slots: [60],
         execution: 'maker',
         shares: SHARES,
@@ -158,6 +155,30 @@ function leadVetoReason(ctx, sideIndex) {
     return null;
 }
 
+export function smartMakerQuote(sideBook, maxPrice = 0.99) {
+    if (sideBook.bestBid === null || sideBook.bestAsk === null || sideBook.bestBid < 0.01) {
+        return { ok: false, reason: 'no_valid_post_only_bid' };
+    }
+    const spread = round(sideBook.bestAsk - sideBook.bestBid);
+    if (spread < 0.01 - EPS) return { ok: false, reason: 'no_valid_post_only_bid' };
+
+    // When spread >= 2 ticks, penny-jump to bestBid + 0.01 for queue priority (queueAhead = 0).
+    if (spread >= 0.02 - EPS) {
+        const price = round(sideBook.bestBid + 0.01);
+        if (price >= sideBook.bestAsk - EPS || price > maxPrice + EPS) {
+            return { ok: false, reason: 'maker_price_above_cap' };
+        }
+        return { ok: true, price, queueAhead: 0, mode: 'penny_jump' };
+    }
+
+    // When spread is 1 tick, only join bestBid if the visible queue is thin enough to fill.
+    if (sideBook.bestBid > maxPrice + EPS) return { ok: false, reason: 'maker_price_above_cap' };
+    if (sideBook.bidSize1 > MAX_MAKER_QUEUE_SHARES + EPS) {
+        return { ok: false, reason: 'maker_queue_too_thick' };
+    }
+    return { ok: true, price: sideBook.bestBid, queueAhead: sideBook.bidSize1, mode: 'join_thin_bid' };
+}
+
 export function evaluateArm(armDef, ctx) {
     if (!armDef.slots.includes(ctx.seconds)) return { action: 'SKIP', reason: 'slot_not_enabled' };
 
@@ -178,19 +199,19 @@ export function evaluateArm(armDef, ctx) {
         };
     };
 
-    const makerOrder = (s) => {
-        if (s.bestBid === null || s.bestAsk === null || s.bestBid < 0.01 || s.bestBid >= s.bestAsk - EPS) {
-            return { action: 'SKIP', reason: 'no_valid_post_only_bid' };
-        }
+    const makerOrder = (s, maxPrice) => {
+        const q = smartMakerQuote(s, maxPrice);
+        if (!q.ok) return { action: 'SKIP', reason: q.reason };
         return {
             action: s.index === 0 ? 'BUY_UP' : 'BUY_DOWN',
             execution: 'maker',
+            makerMode: q.mode,
             index: s.index,
             side: s.side,
             tokenId: s.tokenId,
             shares: armDef.shares,
-            price: s.bestBid,
-            queueAhead: s.bidSize1,
+            price: q.price,
+            queueAhead: q.queueAhead,
             signalBestAsk: s.bestAsk,
             signalBestBid: s.bestBid,
             cancelAtRemainingSec: armDef.cancelAtRemainingSec,
@@ -206,48 +227,47 @@ export function evaluateArm(armDef, ctx) {
         return takerOrder(s);
     }
 
-    if (armDef.name === 'contrarian_dog_60_taker') {
-        const s = singleCandidate(ctx.sides, x => x.bestAsk !== null && x.bestAsk >= 0.15 - EPS && x.bestAsk <= 0.45 + EPS);
-        if (!s) return { action: 'SKIP', reason: 'no_underdog_in_band' };
+    if (armDef.name === 'fav_leadveto_taker') {
+        const s = singleCandidate(ctx.sides, x => x.bestAsk !== null && x.bestAsk >= 0.70 - EPS && x.c5 !== null && x.c5 <= 0.82 + EPS);
+        if (!s) return { action: 'SKIP', reason: 'no_eligible_favorite_in_cap' };
+        const veto = leadVetoReason(ctx, s.index);
+        if (veto) return { action: 'SKIP', reason: veto };
         return takerOrder(s);
     }
 
-    if (armDef.name === 'contrarian_dog_60_maker') {
-        const s = singleCandidate(ctx.sides, x => x.bestAsk !== null && x.bestAsk >= 0.15 - EPS && x.bestAsk <= 0.45 + EPS);
-        if (!s) return { action: 'SKIP', reason: 'no_underdog_in_band' };
-        return makerOrder(s);
-    }
-
-    if (armDef.name === 'fav_90_filtered_taker') {
+    if (armDef.name === 'fav_90_60_imb_lead_taker') {
         const s = singleCandidate(ctx.sides, x => x.bestAsk !== null && x.bestAsk >= 0.70 - EPS && x.c5 !== null && x.c5 <= 0.82 + EPS);
         if (!s) return { action: 'SKIP', reason: 'no_eligible_favorite_in_cap' };
-        if (ctx.sigma === null) return { action: 'SKIP', reason: 'volatility_unavailable' };
-        if (ctx.sigma < HIGH_VOL_SIGMA_USD) return { action: 'SKIP', reason: 'low_volatility_veto' };
         if (s.imb3 < MIN_BOOK_IMBALANCE) return { action: 'SKIP', reason: 'ask_heavy_book_veto' };
         const veto = leadVetoReason(ctx, s.index);
         if (veto) return { action: 'SKIP', reason: veto };
         return takerOrder(s);
     }
 
-    if (armDef.name === 'fav_90_filtered_maker') {
+    if (armDef.name === 'fav_90_only_lead_taker') {
+        const s = singleCandidate(ctx.sides, x => x.bestAsk !== null && x.bestAsk >= 0.70 - EPS && x.c5 !== null && x.c5 <= 0.82 + EPS);
+        if (!s) return { action: 'SKIP', reason: 'no_eligible_favorite_in_cap' };
+        const veto = leadVetoReason(ctx, s.index);
+        if (veto) return { action: 'SKIP', reason: veto };
+        return takerOrder(s);
+    }
+
+    if (armDef.name === 'fav_smart_maker') {
         const s = singleCandidate(ctx.sides, x => x.bestAsk !== null && x.bestAsk >= 0.70 - EPS
             && x.bestBid !== null && x.bestBid <= 0.82 + EPS);
         if (!s) return { action: 'SKIP', reason: 'no_eligible_favorite_in_band' };
-        if (ctx.sigma === null) return { action: 'SKIP', reason: 'volatility_unavailable' };
-        if (ctx.sigma < HIGH_VOL_SIGMA_USD) return { action: 'SKIP', reason: 'low_volatility_veto' };
-        if (s.imb3 < MIN_BOOK_IMBALANCE) return { action: 'SKIP', reason: 'ask_heavy_book_veto' };
         const veto = leadVetoReason(ctx, s.index);
         if (veto) return { action: 'SKIP', reason: veto };
-        return makerOrder(s);
+        return makerOrder(s, 0.82);
     }
 
-    if (armDef.name === 'late_lock_60_maker') {
+    if (armDef.name === 'late_lock_60_smart_maker') {
         const s = singleCandidate(ctx.sides, x => x.bestAsk !== null && x.bestAsk >= 0.90 - EPS && x.bestAsk <= 0.98 + EPS
             && x.bestBid !== null && x.bestBid >= 0.88 - EPS);
         if (!s) return { action: 'SKIP', reason: 'no_late_lock_favorite' };
         const veto = leadVetoReason(ctx, s.index);
         if (veto) return { action: 'SKIP', reason: veto };
-        return makerOrder(s);
+        return makerOrder(s, 0.97);
     }
 
     throw new Error(`unknown_arm_${armDef.name}`);
