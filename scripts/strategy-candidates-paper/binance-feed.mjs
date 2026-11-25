@@ -6,6 +6,9 @@ const ENDPOINTS = [
 ];
 const MAX_HISTORY_MS = 35000;
 const STALE_MS = 3000;
+const WATCHDOG_MS = 10000;
+const WATCHDOG_CHECK_MS = 2000;
+const PING_MS = 30000;
 
 export class BinanceLeadFeed {
     constructor({
@@ -14,23 +17,97 @@ export class BinanceLeadFeed {
         socketFactory = (url, options) => new WebSocket(url, options),
         maxHistoryMs = MAX_HISTORY_MS,
         staleMs = STALE_MS,
+        watchdogMs = WATCHDOG_MS,
+        watchdogCheckMs = WATCHDOG_CHECK_MS,
+        pingMs = PING_MS,
         reconnectBaseMs = 1000,
         reconnectMaxMs = 30000,
+        scheduleInterval = setInterval,
+        cancelInterval = clearInterval,
+        scheduleTimeout = setTimeout,
+        cancelTimeout = clearTimeout,
     } = {}) {
-        Object.assign(this, { endpoints, clock, socketFactory, maxHistoryMs, staleMs, reconnectBaseMs, reconnectMaxMs });
+        Object.assign(this, {
+            endpoints,
+            clock,
+            socketFactory,
+            maxHistoryMs,
+            staleMs,
+            watchdogMs,
+            watchdogCheckMs,
+            pingMs,
+            reconnectBaseMs,
+            reconnectMaxMs,
+            scheduleInterval,
+            cancelInterval,
+            scheduleTimeout,
+            cancelTimeout,
+        });
         this.points = [];
         this.socket = null;
         this.endpointIndex = 0;
         this.failures = 0;
         this.reconnectTimer = null;
+        this.watchdogTimer = null;
+        this.lastMessageAt = null;
+        this.lastPingAt = null;
+        this.staleDrops = 0;
         this.closed = false;
         this.connected = false;
         this.messages = 0;
     }
 
+    _clearWatchdog() {
+        if (this.watchdogTimer) {
+            this.cancelInterval(this.watchdogTimer);
+            this.watchdogTimer = null;
+        }
+    }
+
+    _dropSocket(ws, stale = false) {
+        if (this.socket !== ws) return;
+        this._clearWatchdog();
+        this.socket = null;
+        this.connected = false;
+        if (stale) this.staleDrops++;
+        try {
+            ws.removeAllListeners?.();
+            ws.on?.('error', () => {});
+            ws.terminate?.();
+        } catch { /* ignore */ }
+        if (!this.closed) {
+            this.endpointIndex = (this.endpointIndex + 1) % this.endpoints.length;
+            this._scheduleReconnect();
+        }
+    }
+
+    _checkWatchdog(ws) {
+        if (this.closed || this.socket !== ws) {
+            this._clearWatchdog();
+            return;
+        }
+        const now = this.clock();
+        if (this.lastMessageAt !== null && now - this.lastMessageAt > this.watchdogMs) {
+            this._dropSocket(ws, true);
+            return;
+        }
+        if (
+            this.connected
+            && ws.readyState === WebSocket.OPEN
+            && this.lastPingAt !== null
+            && now - this.lastPingAt >= this.pingMs
+        ) {
+            this.lastPingAt = now;
+            try { ws.ping?.(); } catch { this._dropSocket(ws, true); }
+        }
+    }
+
     start() {
         if (this.closed || this.socket) return;
         const url = this.endpoints[this.endpointIndex % this.endpoints.length];
+        const createdAt = this.clock();
+        this.lastMessageAt = createdAt;
+        this.lastPingAt = createdAt;
         let ws;
         try {
             ws = this.socketFactory(url, { handshakeTimeout: 5000, perMessageDeflate: false });
@@ -41,8 +118,11 @@ export class BinanceLeadFeed {
         this.socket = ws;
         ws.on('open', () => {
             if (this.socket !== ws || this.closed) return;
+            const now = this.clock();
             this.connected = true;
             this.failures = 0;
+            this.lastMessageAt = now;
+            this.lastPingAt = now;
         });
         ws.on('message', raw => {
             if (this.socket !== ws || this.closed) return;
@@ -50,20 +130,16 @@ export class BinanceLeadFeed {
             try { msg = JSON.parse(raw.toString()); } catch { return; }
             const bid = Number(msg?.b), ask = Number(msg?.a);
             if (!(bid > 0) || !(ask > 0) || !Number.isFinite(bid) || !Number.isFinite(ask) || bid > ask) return;
-            this.ingest({ at: this.clock(), bid, ask, mid: (bid + ask) / 2 });
+            const at = this.clock();
+            this.lastMessageAt = at;
+            this.ingest({ at, bid, ask, mid: (bid + ask) / 2 });
         });
-        const onDrop = () => {
-            if (this.socket !== ws) return;
-            this.socket = null;
-            this.connected = false;
-            try { ws.terminate(); } catch { /* ignore */ }
-            if (!this.closed) {
-                this.endpointIndex = (this.endpointIndex + 1) % this.endpoints.length;
-                this._scheduleReconnect();
-            }
-        };
+        const onDrop = () => this._dropSocket(ws, false);
         ws.on('close', onDrop);
         ws.on('error', onDrop);
+        this._clearWatchdog();
+        this.watchdogTimer = this.scheduleInterval(() => this._checkWatchdog(ws), this.watchdogCheckMs);
+        this.watchdogTimer?.unref?.();
     }
 
     ingest(point) {
@@ -81,11 +157,11 @@ export class BinanceLeadFeed {
         if (this.closed || this.reconnectTimer) return;
         this.failures++;
         const waitMs = Math.min(this.reconnectMaxMs, this.reconnectBaseMs * 2 ** Math.min(this.failures - 1, 10));
-        this.reconnectTimer = setTimeout(() => {
+        this.reconnectTimer = this.scheduleTimeout(() => {
             this.reconnectTimer = null;
             if (!this.closed) this.start();
         }, waitMs);
-        this.reconnectTimer.unref?.();
+        this.reconnectTimer?.unref?.();
     }
 
     latest(now = this.clock()) {
@@ -125,13 +201,18 @@ export class BinanceLeadFeed {
             samples: this.points.length,
             messages: this.messages,
             failures: this.failures,
+            staleDrops: this.staleDrops,
         };
     }
 
     close() {
         this.closed = true;
         this.connected = false;
-        if (this.reconnectTimer) { clearTimeout(this.reconnectTimer); this.reconnectTimer = null; }
+        this._clearWatchdog();
+        if (this.reconnectTimer) {
+            this.cancelTimeout(this.reconnectTimer);
+            this.reconnectTimer = null;
+        }
         if (this.socket) {
             try { this.socket.removeAllListeners(); this.socket.on('error', () => {}); this.socket.terminate(); } catch { /* ignore */ }
             this.socket = null;

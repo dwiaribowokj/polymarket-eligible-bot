@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { EventEmitter } from 'node:events';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -298,4 +299,90 @@ test('Maker cancels on >=7 bps Binance adverse move', async () => {
     } finally {
         fs.rmSync(dir, { recursive: true, force: true });
     }
+});
+
+test('BinanceLeadFeed watchdog drops silent zombie socket and reconnects to fallback endpoint', () => {
+    class FakeWebSocket extends EventEmitter {
+        constructor(url) {
+            super();
+            this.url = url;
+            this.readyState = 1;
+            this.terminated = false;
+        }
+        terminate() { this.terminated = true; }
+        ping() {}
+    }
+
+    let now = 1_700_000_000_000;
+    const sockets = [];
+    const intervals = new Map();
+    const timeouts = new Map();
+    let nextTimerId = 1;
+
+    const feed = new BinanceLeadFeed({
+        endpoints: ['wss://primary.example/ws', 'wss://fallback.example/ws'],
+        clock: () => now,
+        watchdogMs: 10000,
+        watchdogCheckMs: 2000,
+        socketFactory: url => {
+            const ws = new FakeWebSocket(url);
+            sockets.push(ws);
+            return ws;
+        },
+        scheduleInterval: fn => {
+            const id = nextTimerId++;
+            intervals.set(id, fn);
+            return id;
+        },
+        cancelInterval: id => { intervals.delete(id); },
+        scheduleTimeout: fn => {
+            const id = nextTimerId++;
+            timeouts.set(id, fn);
+            return id;
+        },
+        cancelTimeout: id => { timeouts.delete(id); },
+    });
+
+    feed.start();
+    assert.equal(sockets.length, 1);
+    assert.equal(sockets[0].url, 'wss://primary.example/ws');
+
+    sockets[0].emit('open');
+    sockets[0].emit('message', JSON.stringify({ b: '60100.0', a: '60100.5' }));
+    assert.equal(feed.connected, true);
+    assert.equal(feed.staleDrops, 0);
+    assert.equal(feed.latest(now).mid, 60100.25);
+
+    // Advance past watchdogMs without messages and fire watchdog callback
+    now += 11000;
+    assert.equal(intervals.size, 1);
+    const [watchdogFn] = [...intervals.values()];
+    watchdogFn();
+
+    assert.equal(sockets[0].terminated, true);
+    assert.equal(feed.connected, false);
+    assert.equal(feed.staleDrops, 1);
+    assert.equal(feed.failures, 1);
+    assert.equal(intervals.size, 0);
+    assert.equal(timeouts.size, 1);
+
+    // Fire scheduled reconnect -> connects to fallback endpoint
+    const [reconnectId, reconnectFn] = [...timeouts.entries()][0];
+    timeouts.delete(reconnectId);
+    reconnectFn();
+
+    assert.equal(sockets.length, 2);
+    assert.equal(sockets[1].url, 'wss://fallback.example/ws');
+    sockets[1].emit('open');
+    sockets[1].emit('message', JSON.stringify({ b: '60200.0', a: '60201.0' }));
+
+    assert.equal(feed.connected, true);
+    assert.equal(feed.failures, 0);
+    assert.equal(feed.latest(now).mid, 60200.5);
+    assert.equal(feed.status(now).staleDrops, 1);
+
+    feed.close();
+    assert.equal(intervals.size, 0);
+    assert.equal(timeouts.size, 0);
+    assert.equal(sockets[1].terminated, true);
 });
