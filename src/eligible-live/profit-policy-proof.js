@@ -32,6 +32,8 @@ export function continuationProfitTaking(config, periodId = config.runtimeContin
     return verified.get(approval).originalProfitTaking;
 }
 
+const verifiedBinanceLeadVetoes = new WeakMap();
+
 export function registerVerifiedEntryCostCapAdjustment(config) {
     const approval = config.runtimeContinuation;
     verifiedCapAdjustments.set(approval, { runtimeId: config.runtimeId,
@@ -49,5 +51,25 @@ export function verifiedEntryCostCapAdjustment(config) {
         || digest(config.policy) !== proof.policySha256
         || approval.policyChange.previousPolicySha256 !== proof.originalPolicySha256)
         throw new Error('eligible_continuation_cost_cap_adjustment_unverified');
+    return proof.originalPolicySha256;
+}
+
+export function registerVerifiedEntryBinanceLeadVeto(config) {
+    const approval = config.runtimeContinuation;
+    verifiedBinanceLeadVetoes.set(approval, { runtimeId: config.runtimeId,
+        policySha256: digest(config.policy), originalPolicySha256: approval.policyChange.previousPolicySha256,
+        dataDir: config.settings.dataDir, wallet: config.settings.wallet });
+}
+
+export function verifiedEntryBinanceLeadVeto(config) {
+    const approval = config.runtimeContinuation, proof = verifiedBinanceLeadVetoes.get(approval);
+    if (!proof || !Object.isFrozen(approval) || approval.reason !== 'user_entry_binance_lead_veto'
+        || approval.runtimeId !== config.runtimeId || config.runtimeId !== proof.runtimeId
+        || config.settings.dataDir !== proof.dataDir || config.settings.wallet !== proof.wallet
+        || digest({ policy: config.policy, sources: config.sources,
+            profitTaking: config.profitTaking }).slice(0, 16) !== config.runtimeId
+        || digest(config.policy) !== proof.policySha256
+        || approval.policyChange.previousPolicySha256 !== proof.originalPolicySha256)
+        throw new Error('eligible_continuation_binance_lead_veto_unverified');
     return proof.originalPolicySha256;
 }

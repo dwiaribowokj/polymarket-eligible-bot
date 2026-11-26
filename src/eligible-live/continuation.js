@@ -50,7 +50,23 @@ function deepFreeze(value) {
     return value;
 }
 
+import { ELIGIBLE_BINANCE_LEAD_VETO } from './binance-lead.js';
+import { registerVerifiedEntryBinanceLeadVeto } from './profit-policy-proof.js';
+
 function policyMatches(config, approval, originalPolicy) {
+    if (approval.reason === 'user_entry_binance_lead_veto') {
+        const change = approval.policyChange;
+        const filter = { version: 'full-fill-all-in-cost-cap-v1', maxCostPerShare: 0.82,
+            gasUsd: originalPolicy?.execution?.gasUsd, basis: 'full_fill_at_frozen_limit',
+            binanceLeadVeto: ELIGIBLE_BINANCE_LEAD_VETO };
+        return record(originalPolicy) && !Object.hasOwn(originalPolicy, 'continuousTrading')
+            && !Object.hasOwn(originalPolicy, 'entryFilter') && Number.isFinite(filter.gasUsd) && filter.gasUsd >= 0
+            && config.settings.continuousTrading === true && config.policy.continuousTrading === true
+            && record(change) && Object.keys(change).length === 2
+            && change.previousPolicySha256 === jsonHash(originalPolicy)
+            && change.currentPolicySha256 === jsonHash(config.policy)
+            && isDeepStrictEqual({ ...originalPolicy, continuousTrading: true, entryFilter: filter }, config.policy);
+    }
     if (approval.reason === 'user_entry_cost_cap_adjustment') {
         const change = approval.policyChange;
         const filter = { version: 'full-fill-all-in-cost-cap-v1', maxCostPerShare: 0.82,
@@ -278,6 +294,56 @@ function validateEntryCostCapAdjustment(config, approval, depth) {
     return continuationProfitTaking(predecessor);
 }
 
+function validateEntryBinanceLeadVeto(config, approval, depth) {
+    const migration = approval.entryBinanceLeadVeto, previous = migration?.previousContinuation;
+    const keys = ['previousRuntimeId', 'previousManifestSha256',
+        'previousContinuation', 'previousContinuationSha256', 'approvedAt'];
+    if (!record(migration) || Object.keys(migration).length !== keys.length
+        || keys.some(key => !Object.hasOwn(migration, key))
+        || !record(previous) || !ID.test(migration.previousRuntimeId)
+        || migration.previousRuntimeId === config.runtimeId
+        || !HASH.test(migration.previousManifestSha256) || !HASH.test(migration.previousContinuationSha256)
+        || jsonHash(previous) !== migration.previousContinuationSha256
+        || previous.schema !== 1 || previous.reason !== 'user_entry_cost_cap_adjustment'
+        || previous.runtimeId !== migration.previousRuntimeId
+        || Object.hasOwn(previous, 'entryBinanceLeadVeto')
+        || !Number.isSafeInteger(migration.approvedAt) || migration.approvedAt < approval.ledgerStartedAt
+        || previous.entryCostCapAdjustment?.approvedAt && migration.approvedAt < previous.entryCostCapAdjustment.approvedAt
+        || approval.profitTakingMigration?.approvedAt && migration.approvedAt < approval.profitTakingMigration.approvedAt
+        || approval.profitTakingStateMigration?.approvedAt && migration.approvedAt < approval.profitTakingStateMigration.approvedAt)
+        fail('binance_lead_veto_predecessor_mismatch');
+    const strip = (value, ignored) => Object.fromEntries(
+        Object.entries(value).filter(([key]) => !ignored.includes(key)));
+    const unchanged = strip(approval, ['runtimeId', 'reason', 'policyChange', 'entryBinanceLeadVeto']);
+    const previousUnchanged = strip(previous, ['runtimeId', 'reason', 'policyChange', 'entryCostCapAdjustment']);
+    if (!isDeepStrictEqual(unchanged, previousUnchanged)
+        || !record(approval.policyChange) || !record(previous.policyChange)
+        || Object.keys(approval.policyChange).length !== 2 || Object.keys(previous.policyChange).length !== 2
+        || approval.policyChange.previousPolicySha256 !== previous.policyChange.previousPolicySha256
+        || approval.policyChange.currentPolicySha256 !== jsonHash(config.policy))
+        fail('binance_lead_veto_predecessor_mismatch');
+    const dataDir = fs.realpathSync(config.settings.dataDir);
+    const bytes = readArtifact(dataDir, approval.periodId, 'eligible-runtime', 'revisions',
+        previous.runtimeId, 'manifest.json');
+    if (digest(bytes) !== migration.previousManifestSha256) fail('binance_lead_veto_predecessor_changed');
+    const manifest = parse(bytes);
+    const previousFilter = manifest.policy?.entryFilter;
+    if (manifest.id !== approval.periodId || manifest.runtimeId !== previous.runtimeId
+        || manifest.startedAt !== approval.ledgerStartedAt || !validSources(manifest.sources)
+        || !isDeepStrictEqual(manifest.profitTaking, config.profitTaking)
+        || jsonHash({ policy: manifest.policy, sources: manifest.sources,
+            profitTaking: manifest.profitTaking }).slice(0, 16) !== previous.runtimeId
+        || previous.policyChange.currentPolicySha256 !== jsonHash(manifest.policy)
+        || !record(previousFilter) || previousFilter.maxCostPerShare !== 0.82
+        || Object.hasOwn(previousFilter, 'binanceLeadVeto')
+        || !isDeepStrictEqual({ ...manifest.policy,
+            entryFilter: { ...previousFilter, binanceLeadVeto: ELIGIBLE_BINANCE_LEAD_VETO } }, config.policy))
+        fail('binance_lead_veto_predecessor_mismatch');
+    const predecessor = validateContinuation({ ...config, runtimeId: previous.runtimeId,
+        policy: manifest.policy, sources: manifest.sources, profitTaking: manifest.profitTaking }, previous, depth + 1);
+    return continuationProfitTaking(predecessor);
+}
+
 function validateBaseSourceRepair(config, approval, depth, sourceRepairRuntimes) {
     const keys = ['schema', 'runtimeId', 'originalRuntimeId', 'periodId', 'reason',
         'originalManifestSha256', 'fundingSha256', 'ledgerStartedAt', 'wallet', 'dataDir',
@@ -367,7 +433,7 @@ function validateContinuation(config, approval, depth = 0, sourceRepairRuntimes 
         || approval.runtimeId !== config.runtimeId
         || !['receipt_fee_estimate_repair', 'pre_entry_signal_repair', 'user_continuous_trading',
             'user_entry_cost_cap', 'user_entry_buffer', 'user_return_cost_cap',
-            'user_entry_cost_cap_adjustment'].includes(approval.reason)
+            'user_entry_cost_cap_adjustment', 'user_entry_binance_lead_veto'].includes(approval.reason)
         || !HASH.test(approval.originalManifestSha256) || !HASH.test(approval.riskRecordSha256)
         || !HASH.test(approval.fundingSha256) || !Number.isSafeInteger(approval.ledgerStartedAt)
         || approval.ledgerStartedAt < 0) fail('approval_mismatch');
@@ -377,7 +443,11 @@ function validateContinuation(config, approval, depth = 0, sourceRepairRuntimes 
     const dataDir = fs.realpathSync(config.settings.dataDir);
     if (approval.reason !== 'user_entry_cost_cap_adjustment' && Object.hasOwn(approval, 'entryCostCapAdjustment'))
         fail('cost_cap_adjustment_predecessor_mismatch');
-    const originalProfitTaking = approval.reason === 'user_entry_cost_cap_adjustment'
+    if (approval.reason !== 'user_entry_binance_lead_veto' && Object.hasOwn(approval, 'entryBinanceLeadVeto'))
+        fail('binance_lead_veto_predecessor_mismatch');
+    const originalProfitTaking = approval.reason === 'user_entry_binance_lead_veto'
+        ? validateEntryBinanceLeadVeto(config, approval, depth)
+        : approval.reason === 'user_entry_cost_cap_adjustment'
         ? validateEntryCostCapAdjustment(config, approval, depth)
         : approval.profitTakingMigration ? validateProfitTakingMigration(config, approval, depth) : config.profitTaking;
     const manifestBytes = readArtifact(dataDir, approval.periodId, 'eligible-runtime', 'manifest.json');
@@ -397,6 +467,7 @@ function validateContinuation(config, approval, depth = 0, sourceRepairRuntimes 
         runtimeContinuation: deepFreeze(approval) };
     if (approval.profitTakingMigration) registerVerifiedProfitTakingMigration(continued, deepFreeze(originalProfitTaking));
     if (approval.reason === 'user_entry_cost_cap_adjustment') registerVerifiedEntryCostCapAdjustment(continued);
+    if (approval.reason === 'user_entry_binance_lead_veto') registerVerifiedEntryBinanceLeadVeto(continued);
     const riskBytes = readArtifact(dataDir, 'eligible-risk-periods', approval.originalRuntimeId,
         approval.periodId, 'record.json');
     if (digest(riskBytes) !== approval.riskRecordSha256) fail('risk_record_changed');

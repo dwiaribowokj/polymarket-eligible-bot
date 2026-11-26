@@ -9,7 +9,8 @@ import { EPS, round } from '../restart/math.js';
 import { expectedWalletBalance } from '../laya-live/recovery.js';
 import { reconcilePeriodTrades } from './period-trades.js';
 import { ELIGIBLE_BUFFER_POLICY } from './entry-buffer.js';
-import { continuationProfitTaking, verifiedEntryCostCapAdjustment } from './profit-policy-proof.js';
+import { ELIGIBLE_BINANCE_LEAD_VETO } from './binance-lead.js';
+import { continuationProfitTaking, verifiedEntryBinanceLeadVeto, verifiedEntryCostCapAdjustment } from './profit-policy-proof.js';
 import { verifiedBaseSourceRepair } from './source-repair.js';
 
 function pilotHistorySnapshots(settings) {
@@ -148,6 +149,19 @@ export function validateRiskPeriodRecord(config, value) {
         const { continuousTrading, entryFilter, ...previousPolicy } = config.policy;
         const filter = { version: 'full-fill-all-in-cost-cap-v1', maxCostPerShare: 0.82,
             gasUsd: previousPolicy.execution?.gasUsd, basis: 'full_fill_at_frozen_limit' };
+        if (config.settings.continuousTrading !== true || continuousTrading !== true
+            || !Number.isFinite(filter.gasUsd) || filter.gasUsd < 0 || !isDeepStrictEqual(entryFilter, filter)
+            || !record(continuation.policyChange) || Object.keys(continuation.policyChange).length !== 2
+            || continuation.policyChange.currentPolicySha256 !== policySha256
+            || originalPolicySha256 !== jsonHash(previousPolicy)) fail('record_mismatch');
+        policySha256 = originalPolicySha256;
+    }
+    if (continuation?.reason === 'user_entry_binance_lead_veto' && continuation.periodId === periodId) {
+        const originalPolicySha256 = verifiedEntryBinanceLeadVeto(config);
+        const { continuousTrading, entryFilter, ...previousPolicy } = config.policy;
+        const filter = { version: 'full-fill-all-in-cost-cap-v1', maxCostPerShare: 0.82,
+            gasUsd: previousPolicy.execution?.gasUsd, basis: 'full_fill_at_frozen_limit',
+            binanceLeadVeto: ELIGIBLE_BINANCE_LEAD_VETO };
         if (config.settings.continuousTrading !== true || continuousTrading !== true
             || !Number.isFinite(filter.gasUsd) || filter.gasUsd < 0 || !isDeepStrictEqual(entryFilter, filter)
             || !record(continuation.policyChange) || Object.keys(continuation.policyChange).length !== 2

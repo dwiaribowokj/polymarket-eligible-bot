@@ -34,10 +34,13 @@ export function parseEligibleArgs(argv) {
     return { command, explicitLive: command === 'run' };
 }
 
-export function eligibleSummary(config, state, history) {
+import { BinanceLeadFeed } from '../src/eligible-live/binance-lead.js';
+
+export function eligibleSummary(config, state, history, binanceLead = null) {
     const readiness = eligibleReadiness({ config, state, history, operationalReady: null });
     const common = { id: config.id, provider: 'eligible', model: ELIGIBLE_MODEL, inference: false,
         automaticActivation: false, liveStarted: !!state, configuration: eligibleConfigView(config),
+        ...(config.policy?.entryFilter?.binanceLeadVeto ? { binanceLead: binanceLead?.status() ?? null } : {}),
         ...readiness, previousLive: previousLiveSummary(config, history), paperEvidence: config.paperEvidence };
     if (!state) return common;
     const { decision, ...performance } = pilotSummary(state);
@@ -81,7 +84,7 @@ export async function main(argv = process.argv.slice(2), dependencies = {}) {
     let history = readHistory(), prior = history.find(state => state.baseline === config.id) || null;
     if (args.command === 'report') { write(eligibleSummary(config, prior, history)); return 0; }
     const release = args.command === 'run' ? await (dependencies.acquireLock || acquireLock)(config.settings.dataDir, 'pilot') : async () => {};
-    let client, providers, engine, supervisor, continuousRecovery, capitalDeposits, externalActivity;
+    let client, providers, engine, supervisor, continuousRecovery, capitalDeposits, externalActivity, binanceLead;
     const shutdown = new AbortController();
     const end = () => {
         shutdown.abort(); supervisor?.requestStop();
@@ -108,9 +111,11 @@ export async function main(argv = process.argv.slice(2), dependencies = {}) {
         providers = new EligibleLiveProvider(config.ai, ai.providers);
         capitalDeposits = new CapitalDepositReconciler(config, store, client);
         externalActivity = new ExternalActivityReconciler(config, store, client);
+        binanceLead = config.policy.entryFilter?.binanceLeadVeto ? new BinanceLeadFeed() : null;
         const createEngine = () => {
             const books = new LiveBookHistory({ onEvent: (type, detail) => engine.bookEvent(type, detail) });
             engine = new LayaLiveEngine(config, store, client, books, providers);
+            engine.binanceLead = binanceLead;
             engine.broker.capitalDeposits = capitalDeposits;
             engine.broker.externalActivity = externalActivity;
             engine.allowSettlementRecovery = false;
@@ -171,15 +176,16 @@ export async function main(argv = process.argv.slice(2), dependencies = {}) {
             entryFilter: config.policy.entryFilter || null, strategyEpochId: state.currentStrategyEpochId || null,
             continuousTrading: config.settings.continuousTrading === true,
             drawdownStop: config.settings.continuousTrading === true ? null : 10 });
+        binanceLead?.start();
         supervisor = new LiveSupervisor({ engine, store, providers, profitTaking, continuousRecovery, signal: shutdown.signal,
             continuousTrading: config.settings.continuousTrading === true,
-            report: () => atomicJson(path.join(artifacts, 'report.json'), eligibleSummary(config, state, readHistory())) });
+            report: () => atomicJson(path.join(artifacts, 'report.json'), eligibleSummary(config, state, readHistory(), binanceLead)) });
         await supervisor.run();
         return 0;
     } finally {
         process.off('SIGINT', end); process.off('SIGTERM', end);
         if (engine && !supervisor) { engine.closed = true; engine.books?.close(); }
-        providers?.close(); client?.close(); await release();
+        binanceLead?.close(); providers?.close(); client?.close(); await release();
     }
 }
 

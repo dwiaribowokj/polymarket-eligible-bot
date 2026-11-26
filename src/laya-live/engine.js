@@ -18,6 +18,7 @@ import { clearEntryHold, entryHeld, holdEntry, marketDiscoveryUnavailable, openi
 import { continuousRecoveryReadCandidate } from '../eligible-live/continuous-recovery.js';
 import { ELIGIBLE_BUFFER_POLICY, assertEligibleEntryPolicy, eligibleEntryPolicy,
     prepareEligibleEntryBuffer } from '../eligible-live/entry-buffer.js';
+import { assertEligibleBinanceLeadLive, prepareEligibleBinanceLead } from '../eligible-live/entry-cost-cap.js';
 
 const invalidData = code => ['stale_laya_input', 'late_laya_response', 'entry_metadata_changed', 'execution_metadata_changed_or_expired',
     'execution_token_mismatch', 'execution_tick_mismatch', 'execution_book_stale_or_future',
@@ -589,7 +590,10 @@ export class LayaLiveEngine extends MaintenanceEngine {
                 evaluationEpochId: this.ai.currentEvaluationEpochId } : {}),
             observedAt: prepared.features.observedAt, input, validation, allowed,
             timing: { ...prepared.timing, preparation: preparationTiming }, inputHash: crypto.createHash('sha256').update(input).digest('hex') };
-        if (provider === 'eligible') prepareEligibleEntryBuffer(snapshot, market, this.client.btc, this.config);
+        if (provider === 'eligible') {
+            prepareEligibleEntryBuffer(snapshot, market, this.client.btc, this.config);
+            prepareEligibleBinanceLead(snapshot, this.binanceLead ?? this.providers?.binanceLead ?? null, this.config, now);
+        }
         this.ai.snapshots.push(snapshot); this.ai.slots[key].status = 'observed';
         this.ai.slots[key].snapshotId = snapshotId;
         const persistenceStartedAt = performance.now();
@@ -733,8 +737,10 @@ export class LayaLiveEngine extends MaintenanceEngine {
             this.assertEntryClock();
             if (this.closed || !this.entryContext) throw new Error('live_entry_context_missing');
             const { market, snapshot, decision } = this.entryContext;
-            if (decisionProvider(this.config) === 'eligible')
+            if (decisionProvider(this.config) === 'eligible') {
                 assertEligibleEntryPolicy({ snapshot, config: this.config, now: Date.now(), market, spec, decision });
+                assertEligibleBinanceLeadLive(this.binanceLead ?? this.providers?.binanceLead ?? null, this.config, spec, Date.now(), snapshot);
+            }
             // Age can expire during healthy inference or wallet reads. Check
             // before stream validation so an old decision is consumed rather
             // than confused with an identity/generation change in metadata.
@@ -753,6 +759,8 @@ export class LayaLiveEngine extends MaintenanceEngine {
             if ((this.entryContext.wallet.spendable ?? this.entryContext.wallet.balance) + EPS < spec.cost)
                 throw new OperationalError('entry_wallet_insufficient', 'opportunity', { stage: 'wallet_read' });
             this.assertSignal(market, spec, Date.now());
+            if (decisionProvider(this.config) === 'eligible')
+                assertEligibleBinanceLeadLive(this.binanceLead ?? this.providers?.binanceLead ?? null, this.config, spec, Date.now(), snapshot);
             // Recheck after any awaited tick verification. Never refresh source timestamps.
             validatedStreamBooks(this.books, market, snapshot.validation, Date.now(), this.config.ai.dataAgeMs);
             this.assertEntryClock();

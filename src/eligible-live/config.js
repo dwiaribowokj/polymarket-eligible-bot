@@ -48,6 +48,8 @@ export function eligibleSources(root = ROOT) {
     return files.sort().map(file => [file, digest(fs.readFileSync(path.join(root, file)))]);
 }
 
+import { ELIGIBLE_BINANCE_LEAD_VETO } from './binance-lead.js';
+
 export function loadEligibleConfig(env = process.env) {
     requireRuntime();
     if (env.ELIGIBLE_CONTINUOUS_TRADING !== undefined
@@ -59,6 +61,9 @@ export function loadEligibleConfig(env = process.env) {
         throw new Error('invalid_eligible_entry_cost_cap');
     if (env.ELIGIBLE_ENTRY_BUFFER !== undefined && !['true', 'false'].includes(env.ELIGIBLE_ENTRY_BUFFER))
         throw new Error('invalid_eligible_entry_buffer');
+    if (env.ELIGIBLE_ENTRY_BINANCE_LEAD_VETO !== undefined
+        && !['true', 'false'].includes(env.ELIGIBLE_ENTRY_BINANCE_LEAD_VETO))
+        throw new Error('invalid_eligible_entry_binance_lead_veto');
     if (env.ELIGIBLE_ENTRY_BUFFER === 'true' && env.ELIGIBLE_ENTRY_COST_CAP === 'true')
         throw new Error('eligible_entry_filters_conflict');
     if (env.ELIGIBLE_ENTRY_COST_CAP_MAX !== undefined) {
@@ -67,11 +72,19 @@ export function loadEligibleConfig(env = process.env) {
         if (env.ELIGIBLE_ENTRY_COST_CAP !== 'true')
             throw new Error('eligible_entry_cost_cap_max_requires_enabled_cap');
     }
+    const binanceLeadVeto = env.ELIGIBLE_ENTRY_BINANCE_LEAD_VETO === 'true';
+    if (binanceLeadVeto) {
+        if (env.ELIGIBLE_ENTRY_COST_CAP !== 'true')
+            throw new Error('eligible_entry_binance_lead_veto_requires_enabled_cap');
+        if (env.ELIGIBLE_ENTRY_BUFFER === 'true')
+            throw new Error('eligible_entry_filters_conflict');
+    }
     const entryFilter = env.ELIGIBLE_ENTRY_BUFFER === 'true'
         ? validateEligibleEntryPolicy({ ...ELIGIBLE_BUFFER_POLICY }, { gasUsd: base.paperGasUsd })
         : env.ELIGIBLE_ENTRY_COST_CAP === 'true' ? validateEligibleEntryFilter({
         version: 'full-fill-all-in-cost-cap-v1', maxCostPerShare: Number(env.ELIGIBLE_ENTRY_COST_CAP_MAX ?? '0.85'),
-        gasUsd: base.paperGasUsd, basis: 'full_fill_at_frozen_limit' }, { gasUsd: base.paperGasUsd }) : null;
+        gasUsd: base.paperGasUsd, basis: 'full_fill_at_frozen_limit',
+        ...(binanceLeadVeto ? { binanceLeadVeto: ELIGIBLE_BINANCE_LEAD_VETO } : {}) }, { gasUsd: base.paperGasUsd }) : null;
     const policy = { schema: 1, provider: 'eligible', model: ELIGIBLE_MODEL,
         aiSource: 'deterministic-eligible-v1', inference: false,
         capital: null, capitalAllocation: 'available_balance', minimumBalance: 0,
