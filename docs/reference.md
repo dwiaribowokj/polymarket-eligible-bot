@@ -70,6 +70,17 @@ Batas $0.82 adalah kandidat riset yang masih memerlukan bukti dari trade baru;
 hasil historis tidak membuktikan profit atau winrate yang lebih baik. Perubahan
 batas live memerlukan persetujuan eksplisit dan riwayat strategi yang terpisah.
 
+`ELIGIBLE_ENTRY_BINANCE_LEAD_VETO=true` menambahkan veto arah jangka pendek dari
+feed WebSocket Binance `btcusdt@bookTicker` (rotasi endpoint otomatis dengan
+watchdog koneksi 10 detik dan ping 30 detik). Dengan lookback 5 detik, entry
+ditolak secara fail-closed (`SKIP` / veto eksekusi) bila harga BTC bergerak
+berlawanan minimal `2 bps` dari arah trade yang diusulkan, feed belum siap, atau
+usia sampel melebihi `3 detik`, dan diperiksa ulang tepat sebelum order dikirim.
+Flag ini wajib disertai `ELIGIBLE_ENTRY_COST_CAP=true`, tidak boleh digabungkan
+dengan `ELIGIBLE_ENTRY_BUFFER=true`, dan hanya menerima `true` atau `false`
+(default kode `false`). Perubahan pada periode live aktif memerlukan persetujuan
+dan continuation teraudit `user_entry_binance_lead_veto` dengan epoch baru.
+
 `ELIGIBLE_ENTRY_BUFFER=true` memakai aturan arm `buffer` pada paper: spot dan
 TWAP searah, masing-masing berjarak minimal satu sigma dari referensi pembukaan.
 Dalam 60 detik terakhir, history TWAP penutupan yang teramati wajib tersedia dan

@@ -64,12 +64,17 @@ lulus. Tanpa variabel tersebut, default kode adalah `false` dan drawdown 10 pUSD
 dapat menghentikan entry. Mengubah template tidak mengubah deployment lama.
 
 Filter default template memakai `ELIGIBLE_ENTRY_COST_CAP=true`,
-`ELIGIBLE_ENTRY_COST_CAP_MAX=0.85`, dan `ELIGIBLE_ENTRY_BUFFER=false`. Biaya
-full-fill lima shares pada limit order, termasuk fee dan estimasi gas, harus
-memenuhi batas 0.85 pUSD/share. Cost-cap dan buffer tidak boleh aktif bersamaan.
-`RESTART_PAPER_GAS_USD=0.05` adalah estimasi USD untuk perhitungan ini, bukan
-saldo POL atau harga gas RPC. Jika cost-cap aktif tanpa nilai maksimum eksplisit,
-default kode juga 0.85; template menuliskannya eksplisit agar kebijakan mudah diperiksa.
+`ELIGIBLE_ENTRY_COST_CAP_MAX=0.82`, `ELIGIBLE_ENTRY_BUFFER=false`, dan
+`ELIGIBLE_ENTRY_BINANCE_LEAD_VETO=true`. Biaya full-fill lima shares pada limit
+order, termasuk fee dan estimasi gas, harus memenuhi batas 0.82 pUSD/share
+(pilihan: `0.82` atau `0.85`). Filter Binance 5 detik menolak entry secara
+fail-closed jika spot BTCUSDT bergerak berlawanan `>= 2 bps` dalam 5 detik
+terakhir, feed belum siap, atau data stale `> 3 detik`. Cost-cap dan buffer
+tidak boleh aktif bersamaan. `RESTART_PAPER_GAS_USD=0.05` adalah estimasi USD
+untuk perhitungan ini, bukan saldo POL atau harga gas RPC. Tanpa nilai eksplisit
+di environment, default kode tetap `0.85` untuk cost-cap dan `false` untuk
+Binance lead-veto; template menuliskannya eksplisit agar kebijakan mudah
+diperiksa.
 
 <a id="eligible-tanpa-ai-manual"></a>
 

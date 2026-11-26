@@ -63,8 +63,13 @@ launcher harus tetap menunjuk runtime yang terikat dengan ledger aktif.
 - Target 5 shares, anggaran per entry maksimal 5 pUSD, satu posisi bot aktif.
 - Slot penilaian 90, 60, dan 30 detik sebelum market selesai.
 - Tepat satu sisi harus memenuhi syarat; selain itu keputusan `SKIP`.
-- Contoh konfigurasi memakai biaya full-fill maksimal 0,85 pUSD/share,
-  termasuk fee dan estimasi gas pada limit awal.
+- Contoh konfigurasi memakai biaya full-fill maksimal 0,82 pUSD/share
+  (`ELIGIBLE_ENTRY_COST_CAP_MAX=0.82`; `0.85` tetap tersedia), termasuk fee dan
+  estimasi gas pada limit awal.
+- `ELIGIBLE_ENTRY_BINANCE_LEAD_VETO=true` mengaktifkan feed WebSocket Binance
+  `btcusdt@bookTicker` untuk memveto entry jika BTC bergerak berlawanan `>= 2 bps`
+  dalam 5 detik terakhir, atau fail-closed bila feed belum siap / stale `> 3 detik`,
+  yang diperiksa saat evaluasi maupun tepat sebelum order dikirim.
 - Order FAK memakai limit tetap; partial fill diterima tanpa mengejar sisa order.
 - Harga, likuiditas, saldo, dan kesegaran data diperiksa lagi sebelum eksekusi.
 
@@ -133,6 +138,16 @@ node scripts/entry-filter-paper.js report --out="$PWD/data/entry-filter-paper/mo
 Momentum adalah hipotesis utama; filter ask diuji terpisah sebagai pembanding
 sekunder. Hasil historis bukan bukti bahwa keduanya akan memperbaiki live.
 
+Untuk mengevaluasi kandidat cap 0,82, veto arah Binance 5 detik
+(`fav_leadveto_taker`), dan pembanding taker/maker secara bersamaan pada data
+orderbook publik serta feed spot Binance:
+
+```bash
+node scripts/strategy-candidates-paper/runner.mjs preflight --out="$PWD/data/strategy-candidates-paper/period-001"
+node scripts/strategy-candidates-paper/runner.mjs run --out="$PWD/data/strategy-candidates-paper/period-001"
+node scripts/strategy-candidates-paper/runner.mjs report --out="$PWD/data/strategy-candidates-paper/period-001"
+```
+
 `npm start` dan `npm run paper` tetap menjalankan simulasi aturan dasar.
 Rincian profil dan runner riset lain ada di [referensi](docs/reference.md).
 
@@ -160,6 +175,7 @@ npm test
 | Lokasi | Fungsi |
 | --- | --- |
 | `scripts/poly`, `scripts/eligible-live-control.js` | Controller live |
+| `scripts/strategy-candidates-paper/` | Paper riset multi-arm dengan feed Binance 5 detik |
 | `src/eligible-live/` | Keputusan aturan, filter entry, dan identitas periode |
 | `src/laya-live/` | Mesin eksekusi bersama, RPC, rekonsiliasi, dan settlement |
 | `src/restart/` | Client dasar, penyimpanan, dan simulasi aturan |
