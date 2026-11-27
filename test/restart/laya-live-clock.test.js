@@ -210,15 +210,57 @@ test('exhausted timeout pauses entry and recovers with bounded probes for flat a
     });
 });
 
-test('only allowlisted public-clock transport failures can enter a hold', () => {
-    for (const [code, category] of [['read_timeout', 'timeout'], ['transport_failed', 'transport'],
-        ['http_server_error', 'transport'], ['rate_limited', 'rate_limit'], ['rate_limit_wait', 'rate_limit'], ['circuit_open', 'circuit']])
-        assert.equal(temporaryClockFailure(new OperationalError(code, category, { stage: 'server_time', endpoint: 'clob' })), true);
+test('only allowlisted public-clock transport failures and CLOB 425 server_time can enter a hold', () => {
+    for (const [code, category, extra] of [['read_timeout', 'timeout', {}], ['transport_failed', 'transport', {}],
+        ['http_server_error', 'transport', {}], ['rate_limited', 'rate_limit', {}], ['rate_limit_wait', 'rate_limit', {}],
+        ['circuit_open', 'circuit', {}], ['http_rejected', 'api_rejection', { httpStatus: 425 }]])
+        assert.equal(temporaryClockFailure(new OperationalError(code, category,
+            { stage: 'server_time', endpoint: 'clob', ...extra })), true);
     for (const error of [new Error('private payload'), new OperationalError('invalid_api_data', 'validation'),
         new OperationalError('invalid_server_clock', 'stale_data'), new OperationalError('http_rejected', 'api_rejection'),
+        new OperationalError('http_rejected', 'api_rejection', { httpStatus: 400, stage: 'server_time', endpoint: 'clob' }),
+        new OperationalError('http_rejected', 'api_rejection', { httpStatus: 401, stage: 'server_time', endpoint: 'clob' }),
+        new OperationalError('http_rejected', 'api_rejection', { httpStatus: 403, stage: 'server_time', endpoint: 'clob' }),
+        new OperationalError('http_rejected', 'api_rejection', { httpStatus: 404, stage: 'server_time', endpoint: 'clob' }),
+        new OperationalError('http_rejected', 'api_rejection', { httpStatus: 425, stage: 'order_status', endpoint: 'clob' }),
+        new OperationalError('http_rejected', 'api_rejection', { httpStatus: 425, stage: 'server_time', endpoint: 'gamma' }),
         new OperationalError('read_timeout', 'timeout', { stage: 'order_status' }),
         new OperationalError('read_timeout', 'timeout', { endpoint: 'rpc' }), new OperationalError('other', 'timeout')])
         assert.equal(temporaryClockFailure(error), false);
+});
+
+test('CLOB HTTP 425 on serverTime pauses entry with retryable hold and recovers cleanly', async t => {
+    t.mock.timers.enable({ apis: ['Date'], now: 1000000000000 });
+    let probes = 0, early425 = true;
+    const f = engineFixture(t, {
+        serverTime: async () => {
+            probes++;
+            if (early425) throw new OperationalError('http_rejected', 'api_rejection',
+                { httpStatus: 425, stage: 'server_time', endpoint: 'clob', retryAfter: 12 });
+            return Date.now();
+        },
+    });
+    await f.engine.tick();
+    assert.equal(f.store.state.stopped, null);
+    assert.equal(f.store.state.liveClock.status, 'waiting');
+    assert.equal(f.store.state.liveClock.error.httpStatus, 425);
+    assert.equal(f.store.state.entryHolds.clock.retryable, true);
+    assert.equal(f.store.state.entryHolds.clock.retryAt - Date.now(), 12000);
+    assert.equal(f.decisions(), 0);
+    assert.equal(probes, 1);
+
+    t.mock.timers.setTime(Date.now() + 11999);
+    await f.engine.tick();
+    assert.equal(probes, 1);
+
+    early425 = false;
+    t.mock.timers.setTime(Date.now() + 1);
+    await f.engine.tick();
+    assert.equal(probes, 2);
+    assert.equal(f.store.state.liveClock.status, 'verified');
+    assert.equal(f.store.state.stopped, null);
+    assert.deepEqual(f.store.state.entryHolds, {});
+    assert.equal(f.decisions(), 1);
 });
 
 test('Retry-After and shared CLOB circuits defer probes without log spam', async t => {

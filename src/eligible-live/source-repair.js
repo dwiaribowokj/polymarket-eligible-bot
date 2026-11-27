@@ -1,8 +1,10 @@
 import { createHash } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import { externalActivityCandidate } from '../laya-live/external-activity.js';
+import { ELIGIBLE_BINANCE_LEAD_VETO } from './binance-lead.js';
 
 const verified = new WeakMap();
+const record = value => value !== null && typeof value === 'object' && !Array.isArray(value);
 const digest = value => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 const fail = () => { throw new Error('eligible_source_repair_unproven'); };
 
@@ -18,10 +20,13 @@ export function verifiedBaseSourceRepair(config) {
         && config.settings.fingerprint === approval.periodId ? approval : null;
 }
 
-function verifyPredecessorLineage(state, approval) {
-    if (!approval.sourceRepairMigration) return;
+function verifyPredecessorLineage(state, approval, firstPrevious = approval.sourceRepairMigration?.previousContinuation) {
+    if (!firstPrevious) {
+        if (approval.reason === 'base_period_binance_lead_veto' && state.continuousOperationHistory?.length) fail();
+        return;
+    }
     const predecessors = [], history = state.continuousOperationHistory || [];
-    for (let previous = approval.sourceRepairMigration.previousContinuation; previous;
+    for (let previous = firstPrevious; previous;
         previous = previous.sourceRepairMigration?.previousContinuation) predecessors.unshift(previous);
     if (history.length !== predecessors.length) fail();
     predecessors.forEach((previous, index) => {
@@ -41,7 +46,8 @@ function verifyPredecessorLineage(state, approval) {
 // the ordinary reconciler must still prove and complete any empty reservation.
 export function prepareBaseSourceRepair(state, config, now = Date.now()) {
     const approval = verifiedBaseSourceRepair(config), operation = state.continuousOperation;
-    if (!approval || digest(state) !== approval.stateSha256 || !Number.isSafeInteger(now)
+    if (!approval || approval.reason !== 'base_period_source_repair'
+        || digest(state) !== approval.stateSha256 || !Number.isSafeInteger(now)
         || now < approval.approvedAt || config.settings.continuousTrading !== true
         || state.baseline !== config.id || state.startedAt !== approval.ledgerStartedAt
         || state.mode !== 'pilot' || state.strategy !== 'late-entry' || state.decisionProvider !== 'eligible'
@@ -62,5 +68,62 @@ export function prepareBaseSourceRepair(state, config, now = Date.now()) {
             previousManifestSha256: approval.sourceRepairMigration?.previousManifestSha256
                 || approval.originalManifestSha256 }];
     next.continuousOperation.runtimeId = config.runtimeId;
+    return next;
+}
+
+export function prepareBaseBinanceLeadVeto(state, config, now = Date.now(), { walletProof = null } = {}) {
+    const approval = verifiedBaseSourceRepair(config), operation = state?.continuousOperation;
+    const previousRuntimeId = approval?.entryBinanceLeadVeto?.previousRuntimeId || approval?.originalRuntimeId;
+    const previousManifestSha256 = approval?.entryBinanceLeadVeto?.previousManifestSha256 || approval?.originalManifestSha256;
+    if (!approval || approval.reason !== 'base_period_binance_lead_veto'
+        || digest(state) !== approval.stateSha256 || !Number.isSafeInteger(now)
+        || now < approval.approvedAt || config.settings.continuousTrading !== true
+        || state.baseline !== config.id || state.startedAt !== approval.ledgerStartedAt
+        || state.mode !== 'pilot' || state.strategy !== 'late-entry' || state.decisionProvider !== 'eligible'
+        || state.position !== null || state.stopped != null || state.liveRiskStop != null || state.frozenAt != null
+        || state.entryHolds != null && (!record(state.entryHolds) || Object.keys(state.entryHolds).length > 0)
+        || state.reconciliationFaults != null && (!record(state.reconciliationFaults) || Object.keys(state.reconciliationFaults).length > 0)
+        || state.profitTaking?.pending != null || state.profitTakingControl?.operation != null
+        || !Array.isArray(state.completed) || state.completed.some(row => !record(row) || row.uncertain || row.pendingTrades)
+        || !record(state.ai?.providers) || Object.values(state.ai.providers).some(provider => !provider || provider.pending || provider.disabled)
+        || !Array.isArray(state.ai.snapshots)
+        || operation?.runtimeId !== previousRuntimeId || !Number.isSafeInteger(operation.enabledAt)
+        || operation.enabledAt < state.startedAt || operation.enabledAt > approval.approvedAt
+        || state.continuousOperationHistory != null && !Array.isArray(state.continuousOperationHistory)
+        || state.continuousOperationHistory?.some(row => !row || row.nextRuntimeId === config.runtimeId)) fail();
+    verifyPredecessorLineage(state, approval, approval.entryBinanceLeadVeto?.previousContinuation);
+    const epochs = state.strategyEpochs;
+    if (!Array.isArray(epochs) || !epochs.length) fail();
+    const previousEpoch = epochs.at(-1);
+    if (!record(previousEpoch) || previousEpoch.id !== state.currentStrategyEpochId
+        || !record(previousEpoch.policy?.entryFilter)
+        || !isDeepStrictEqual({ ...previousEpoch.policy,
+            entryFilter: { ...previousEpoch.policy.entryFilter, binanceLeadVeto: ELIGIBLE_BINANCE_LEAD_VETO } }, config.policy))
+        fail();
+    const next = structuredClone(state);
+    next.continuousOperationHistory = [...(state.continuousOperationHistory || []),
+        { ...operation, migratedAt: now, nextRuntimeId: config.runtimeId,
+            reasonVerified: 'base_period_binance_lead_veto', beforeSha256: approval.stateSha256,
+            previousManifestSha256 }];
+    next.continuousOperation.runtimeId = config.runtimeId;
+    const epochIdentity = {
+        periodId: config.id, runtimeId: config.runtimeId, startedAt: now,
+        firstCompletedIndex: state.completed.length, firstSnapshotIndex: state.ai.snapshots.length,
+    };
+    const epoch = {
+        id: digest(epochIdentity).slice(0, 16),
+        ...epochIdentity,
+        policy: structuredClone(config.policy),
+        cashAtStart: state.cash,
+        previousStrategyEpochId: previousEpoch.id,
+        previousRuntimeId,
+        reason: 'base_period_binance_lead_veto',
+        beforeSha256: approval.stateSha256,
+        previousManifestSha256,
+        ...(approval.entryBinanceLeadVeto ? { previousContinuationSha256: approval.entryBinanceLeadVeto.previousContinuationSha256 } : {}),
+        ...(walletProof ? { walletProof: structuredClone(walletProof) } : {}),
+    };
+    next.strategyEpochs = [...epochs, epoch];
+    next.currentStrategyEpochId = epoch.id;
     return next;
 }

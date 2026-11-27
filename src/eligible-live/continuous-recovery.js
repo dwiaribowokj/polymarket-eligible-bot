@@ -3,6 +3,7 @@ import { isDeepStrictEqual } from 'node:util';
 import { EPS } from '../restart/math.js';
 import { safeError } from '../restart/network.js';
 import { expectedWalletBalance } from '../laya-live/recovery.js';
+import { temporaryClockFailure } from '../laya-live/clock.js';
 import { marketDiscoveryUnavailable, temporaryReadFailure } from '../laya-live/entry-holds.js';
 import { ExternalActivityReconciler, externalTokenBalances } from '../laya-live/external-activity.js';
 import { accountedCapitalHashes } from '../laya-live/deposits.js';
@@ -66,7 +67,8 @@ function retryableReadHolds(holds, enabledAt, now) {
                     && ['market_discovery', 'metadata_read', 'btc_reference'].includes(error.stage)
                 || key === 'market_watch' && marketDiscoveryUnavailable(error)
                 || key === 'book_stream' && error.code === 'live_book_transport_gap' && error.category === 'transport'
-                || key === 'clock' && (error.code === 'invalid_server_clock' && error.category === 'stale_data'
+                || key === 'clock' && (temporaryClockFailure(error)
+                    || error.code === 'invalid_server_clock' && error.category === 'stale_data'
                     || error.code === 'invalid_api_data' && error.category === 'validation'));
     });
 }

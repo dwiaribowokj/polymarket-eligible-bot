@@ -424,10 +424,105 @@ function validateBaseSourceRepair(config, approval, depth, sourceRepairRuntimes)
         riskRuntimeId: approval.originalRuntimeId, runtimeContinuation: deepFreeze(approval) });
 }
 
+function validateBaseBinanceLeadVeto(config, approval, depth, sourceRepairRuntimes) {
+    const keys = ['schema', 'runtimeId', 'originalRuntimeId', 'periodId', 'reason',
+        'originalManifestSha256', 'fundingSha256', 'ledgerStartedAt', 'wallet', 'dataDir',
+        'stateSha256', 'approvedAt', 'policyChange'];
+    if (Object.hasOwn(approval, 'entryBinanceLeadVeto')) keys.push('entryBinanceLeadVeto');
+    if (Object.keys(approval).length !== keys.length || keys.some(key => !Object.hasOwn(approval, key))
+        || approval.schema !== 1 || !ID.test(approval.runtimeId) || !ID.test(approval.originalRuntimeId)
+        || approval.periodId !== approval.originalRuntimeId || approval.runtimeId === approval.originalRuntimeId
+        || approval.runtimeId !== config.runtimeId || config.riskPeriod || config.runtimeContinuation
+        || !HASH.test(approval.originalManifestSha256) || !HASH.test(approval.fundingSha256)
+        || !HASH.test(approval.stateSha256) || !Number.isSafeInteger(approval.ledgerStartedAt)
+        || approval.ledgerStartedAt < 0 || !Number.isSafeInteger(approval.approvedAt)
+        || approval.approvedAt < approval.ledgerStartedAt
+        || !/^0x[a-f0-9]{40}$/.test(approval.wallet) || /^0x0{40}$/.test(approval.wallet)
+        || approval.wallet !== config.settings.wallet?.toLowerCase()
+        || !path.isAbsolute(config.settings.dataDir) || !validSources(config.sources)
+        || jsonHash({ policy: config.policy, sources: config.sources,
+            profitTaking: config.profitTaking }).slice(0, 16) !== config.runtimeId) fail('approval_mismatch');
+    if (sourceRepairRuntimes.has(config.runtimeId)) fail('source_repair_cycle');
+    const visited = new Set(sourceRepairRuntimes).add(config.runtimeId);
+    const dataDir = fs.realpathSync(config.settings.dataDir);
+    if (dataDir !== approval.dataDir) fail('unsafe_path');
+    const riskRoot = path.join(dataDir, 'eligible-risk-periods');
+    try { if (!fs.lstatSync(riskRoot).isDirectory()) fail('unsafe_path'); }
+    catch (error) { if (error.code !== 'ENOENT') throw error; }
+    // A base-period continuation cannot acknowledge, replace, or bypass a risk period.
+    for (const runtime of [approval.originalRuntimeId, config.runtimeId]) {
+        try { fs.lstatSync(path.join(riskRoot, runtime)); fail('base_period_conflict'); }
+        catch (error) { if (error.code !== 'ENOENT') throw error; }
+    }
+    const bytes = readArtifact(dataDir, approval.periodId, 'eligible-runtime', 'manifest.json');
+    if (digest(bytes) !== approval.originalManifestSha256) fail('manifest_changed');
+    const manifest = parse(bytes), originalFilter = manifest.policy?.entryFilter;
+    if (manifest.id !== approval.periodId || manifest.startedAt !== approval.ledgerStartedAt
+        || manifest.runtimeId != null && manifest.runtimeId !== approval.originalRuntimeId
+        || !validSources(manifest.sources) || !isDeepStrictEqual(manifest.profitTaking, config.profitTaking)
+        || jsonHash({ policy: manifest.policy, sources: manifest.sources,
+            profitTaking: manifest.profitTaking }).slice(0, 16) !== approval.originalRuntimeId
+        || manifest.policy?.continuousTrading !== true || config.settings.continuousTrading !== true
+        || !record(originalFilter) || originalFilter.version !== 'full-fill-all-in-cost-cap-v1'
+        || originalFilter.maxCostPerShare !== 0.82 || originalFilter.basis !== 'full_fill_at_frozen_limit'
+        || !Number.isFinite(originalFilter.gasUsd) || originalFilter.gasUsd < 0
+        || originalFilter.gasUsd !== manifest.policy?.execution?.gasUsd
+        || Object.hasOwn(originalFilter, 'binanceLeadVeto')
+        || !record(approval.policyChange) || Object.keys(approval.policyChange).length !== 2
+        || approval.policyChange.previousPolicySha256 !== jsonHash(manifest.policy)
+        || approval.policyChange.currentPolicySha256 !== jsonHash(config.policy)
+        || !isDeepStrictEqual({ ...manifest.policy,
+            entryFilter: { ...originalFilter, binanceLeadVeto: ELIGIBLE_BINANCE_LEAD_VETO } }, config.policy))
+        fail('manifest_mismatch');
+    if (Object.hasOwn(approval, 'entryBinanceLeadVeto')) {
+        const migration = approval.entryBinanceLeadVeto, previous = migration?.previousContinuation;
+        const migrationKeys = ['previousRuntimeId', 'previousManifestSha256',
+            'previousContinuation', 'previousContinuationSha256'];
+        const unchanged = ['schema', 'originalRuntimeId', 'periodId', 'originalManifestSha256',
+            'fundingSha256', 'ledgerStartedAt', 'wallet', 'dataDir'];
+        if (!record(migration) || Object.keys(migration).length !== migrationKeys.length
+            || migrationKeys.some(key => !Object.hasOwn(migration, key)) || !record(previous)
+            || !ID.test(migration.previousRuntimeId) || migration.previousRuntimeId === config.runtimeId
+            || previous.runtimeId !== migration.previousRuntimeId
+            || previous.reason !== 'base_period_source_repair'
+            || !HASH.test(migration.previousManifestSha256) || !HASH.test(migration.previousContinuationSha256)
+            || jsonHash(previous) !== migration.previousContinuationSha256
+            || unchanged.some(key => previous[key] !== approval[key])
+            || !Number.isSafeInteger(previous.approvedAt) || previous.approvedAt > approval.approvedAt)
+            fail('binance_lead_veto_predecessor_mismatch');
+        if (visited.has(previous.runtimeId)) fail('source_repair_cycle');
+        const previousBytes = readArtifact(dataDir, approval.periodId, 'eligible-runtime',
+            'revisions', previous.runtimeId, 'manifest.json');
+        if (digest(previousBytes) !== migration.previousManifestSha256) fail('binance_lead_veto_predecessor_changed');
+        const previousManifest = parse(previousBytes);
+        if (previousManifest.id !== approval.periodId || previousManifest.runtimeId !== previous.runtimeId
+            || previousManifest.startedAt !== approval.ledgerStartedAt || !validSources(previousManifest.sources)
+            || !isDeepStrictEqual(previousManifest.policy, manifest.policy)
+            || !isDeepStrictEqual(previousManifest.profitTaking, config.profitTaking)
+            || jsonHash({ policy: previousManifest.policy, sources: previousManifest.sources,
+                profitTaking: previousManifest.profitTaking }).slice(0, 16) !== previous.runtimeId)
+            fail('binance_lead_veto_predecessor_mismatch');
+        validateContinuation({ ...config, runtimeId: previous.runtimeId,
+            policy: previousManifest.policy, sources: previousManifest.sources,
+            profitTaking: previousManifest.profitTaking }, previous, depth + 1, visited);
+    }
+    const ledger = parse(readArtifact(dataDir, approval.periodId, 'pilot', 'late-entry.json'));
+    if (ledger.baseline !== approval.periodId || ledger.mode !== 'pilot' || ledger.strategy !== 'late-entry'
+        || ledger.decisionProvider !== 'eligible' || ledger.startedAt !== approval.ledgerStartedAt
+        || !record(ledger.liveFunding) || jsonHash(ledger.liveFunding) !== approval.fundingSha256)
+        fail('ledger_mismatch');
+    const settings = { ...config.settings, fingerprint: approval.periodId };
+    return registerBaseSourceRepair({ ...config, id: approval.periodId, settings,
+        ai: { ...config.ai, id: approval.periodId, control: settings },
+        riskRuntimeId: approval.originalRuntimeId, runtimeContinuation: deepFreeze(approval) });
+}
+
 function validateContinuation(config, approval, depth = 0, sourceRepairRuntimes = new Set()) {
     if (depth > 8) fail('approval_depth');
     if (approval.reason === 'base_period_source_repair')
         return validateBaseSourceRepair(config, approval, depth, sourceRepairRuntimes);
+    if (approval.reason === 'base_period_binance_lead_veto')
+        return validateBaseBinanceLeadVeto(config, approval, depth, sourceRepairRuntimes);
     if (approval.schema !== 1 || !ID.test(approval.runtimeId) || !ID.test(approval.originalRuntimeId)
         || !ID.test(approval.periodId) || approval.runtimeId === approval.originalRuntimeId
         || approval.runtimeId !== config.runtimeId

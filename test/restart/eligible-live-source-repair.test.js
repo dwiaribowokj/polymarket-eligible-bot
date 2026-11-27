@@ -9,7 +9,8 @@ import { newPosition } from '../../src/restart/strategy.js';
 import { loadEligibleConfig } from '../../src/eligible-live/config.js';
 import { bindRuntimeContinuation, eligibleManifestPath } from '../../src/eligible-live/continuation.js';
 import { bindRiskPeriod, readRiskPeriodHistory } from '../../src/eligible-live/period.js';
-import { prepareBaseSourceRepair, verifiedBaseSourceRepair } from '../../src/eligible-live/source-repair.js';
+import { prepareBaseSourceRepair, prepareBaseBinanceLeadVeto, verifiedBaseSourceRepair } from '../../src/eligible-live/source-repair.js';
+import { ELIGIBLE_BINANCE_LEAD_VETO } from '../../src/eligible-live/binance-lead.js';
 import { initializeContinuousState } from '../../src/eligible-live/continuous-recovery.js';
 import { initializeEligibleStrategyEpoch } from '../../src/eligible-live/strategy-epochs.js';
 
@@ -398,5 +399,241 @@ test('source repair chains reject repeated runtimes and excessive predecessor de
         const f = fixture(t);
         for (let index = 0; index < 9; index++) advanceSourceRepair(f, 2100 + index * 200);
         assert.throws(f.bind, /eligible_continuation_approval_depth/);
+    });
+});
+
+function baseLeadVetoFixture(t, { chained = true, cap = '0.82', emptyProviders = false } = {}) {
+    const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'eligible-base-lead-veto-'));
+    t.after(() => fs.rmSync(dataDir, { recursive: true, force: true }));
+    const baseEnv = {
+        RESTART_DATA_DIR: dataDir,
+        PROXY_WALLET_ADDRESS: wallet,
+        PRIVATE_KEY: `0x${'1'.repeat(64)}`,
+        ELIGIBLE_CONTINUOUS_TRADING: 'true',
+        ELIGIBLE_ENTRY_COST_CAP: 'true',
+        ELIGIBLE_ENTRY_COST_CAP_MAX: cap,
+        LAYA_PROFIT_TAKING_ENABLED: 'true',
+        LAYA_PROFIT_TRIGGER: 'wallet_balance',
+        LAYA_PROFIT_LOSS_PROTECTION_ENABLED: 'true',
+        LAYA_PROFIT_RECIPIENT: `0x${'c'.repeat(40)}`,
+    };
+    const original = loadEligibleConfig(baseEnv);
+    const originalSources = [['src/original.js', 'a'.repeat(64)]];
+    const originalCfg = { ...original, sources: originalSources };
+    const periodId = identity(originalCfg);
+    const store = new Store({ ...original.settings, fingerprint: periodId }, 'pilot', 'late-entry');
+    const state = store.state;
+    Object.assign(state, {
+        startedAt: 1000, decisionProvider: 'eligible', cash: 11.71, peakEquity: 14.24,
+        maxDrawdown: 3.94, lastEquity: 11.71, walletStart: 0, walletCashDelta: 6.78,
+        liveFunding: { at: 1000, initialCapital: 0, allocation: 'available_balance' },
+        continuousOperation: { enabledAt: 1100, runtimeId: periodId },
+        ai: { providers: emptyProviders ? {} : { eligible: { pending: null } }, slots: { reserved: true },
+            snapshots: [{ snapshotId: 'snap-1', at: 1500 }] },
+        completed: [{ slug: 'previous-market', traded: true, pnl: 1.41, fees: 0.02, gas: 0.05,
+            closedAt: 1400, tokens: ['3', '4'] }],
+        stopHistory: [{ reason: 'operational_check_failed', at: 1900, recoveredAt: 2000 }],
+        reconciliationFaults: {}, entryHolds: {},
+        strategyEpochs: [{ id: '0d9b634c12d346aa', periodId, runtimeId: periodId, startedAt: 1100,
+            policy: structuredClone(original.policy), firstCompletedIndex: 0, firstSnapshotIndex: 0 }],
+        currentStrategyEpochId: '0d9b634c12d346aa',
+    });
+    store.save();
+    const manifestFile = path.join(dataDir, periodId, 'eligible-runtime', 'manifest.json');
+    atomicJson(manifestFile, { id: periodId, runtimeId: periodId, policy: original.policy,
+        sources: originalSources, profitTaking: original.profitTaking, startedAt: state.startedAt });
+    const approvalFile = path.join(dataDir, 'continuation.json');
+
+    let previousContinuation = null, previousManifestFile = manifestFile, previousRuntimeId = periodId;
+    if (chained) {
+        let currentCfg = { ...originalCfg, runtimeId: periodId };
+        let currentApproval = null;
+        for (const [index, at] of [2100, 2300].entries()) {
+            const nextSources = [[`src/repair-${index}.js`, digest(`repair-${index}`)]];
+            const nextCfg = { ...currentCfg, sources: nextSources };
+            nextCfg.runtimeId = identity(nextCfg);
+            const repairApproval = {
+                schema: 1, runtimeId: nextCfg.runtimeId, originalRuntimeId: periodId, periodId,
+                reason: 'base_period_source_repair',
+                originalManifestSha256: digest(fs.readFileSync(manifestFile)),
+                fundingSha256: jsonHash(state.liveFunding), ledgerStartedAt: state.startedAt,
+                wallet, dataDir, stateSha256: jsonHash(state), approvedAt: at,
+                ...(currentApproval ? {
+                    sourceRepairMigration: {
+                        previousRuntimeId: currentCfg.runtimeId,
+                        previousManifestSha256: digest(fs.readFileSync(previousManifestFile)),
+                        previousContinuation: currentApproval,
+                        previousContinuationSha256: jsonHash(currentApproval),
+                    },
+                } : {}),
+            };
+            atomicJson(approvalFile, repairApproval);
+            const bound = bindRiskPeriod(bindRuntimeContinuation(
+                { ...original, runtimeId: nextCfg.runtimeId, sources: nextSources },
+                { ELIGIBLE_LIVE_CONTINUATION: approvalFile }));
+            const nextState = prepareBaseSourceRepair(state, bound, at + 50);
+            Object.assign(state, nextState);
+            store.save();
+            previousManifestFile = eligibleManifestPath(bound);
+            atomicJson(previousManifestFile, { id: periodId, runtimeId: bound.runtimeId, policy: bound.policy,
+                sources: bound.sources, profitTaking: bound.profitTaking, startedAt: state.startedAt });
+            currentCfg = bound;
+            currentApproval = repairApproval;
+        }
+        previousContinuation = currentApproval;
+        previousRuntimeId = currentCfg.runtimeId;
+    }
+
+    const targetEnv = { ...baseEnv, ELIGIBLE_ENTRY_BINANCE_LEAD_VETO: 'true' };
+    const bareLead = loadEligibleConfig(targetEnv);
+    const leadSources = [['src/lead-veto.js', digest('lead-veto')]];
+    const leadConfig = { ...bareLead, sources: leadSources, runtimeId: identity({ ...bareLead, sources: leadSources }) };
+    const approval = {
+        schema: 1,
+        runtimeId: leadConfig.runtimeId,
+        originalRuntimeId: periodId,
+        periodId,
+        reason: 'base_period_binance_lead_veto',
+        originalManifestSha256: digest(fs.readFileSync(manifestFile)),
+        fundingSha256: jsonHash(state.liveFunding),
+        ledgerStartedAt: state.startedAt,
+        wallet,
+        dataDir,
+        stateSha256: jsonHash(state),
+        approvedAt: 2500,
+        policyChange: {
+            previousPolicySha256: jsonHash(original.policy),
+            currentPolicySha256: jsonHash(leadConfig.policy),
+        },
+        ...(chained ? {
+            entryBinanceLeadVeto: {
+                previousRuntimeId,
+                previousManifestSha256: digest(fs.readFileSync(previousManifestFile)),
+                previousContinuation,
+                previousContinuationSha256: jsonHash(previousContinuation),
+            },
+        } : {}),
+    };
+    const saveApproval = () => atomicJson(approvalFile, approval);
+    const repin = () => {
+        store.save();
+        approval.stateSha256 = jsonHash(state);
+        saveApproval();
+    };
+    saveApproval();
+    targetEnv.ELIGIBLE_LIVE_CONTINUATION = approvalFile;
+    return {
+        dataDir, env: targetEnv, config: leadConfig, original, store, state, periodId,
+        manifestFile, previousManifestFile, approval, approvalFile, saveApproval, repin,
+        bind: () => bindRiskPeriod(bindRuntimeContinuation(leadConfig, targetEnv)),
+    };
+}
+
+test('base_period_binance_lead_veto supports direct and chained base-period migration without writes or risk reset', async t => {
+    for (const [label, opts] of [
+        ['chained after 2x base_period_source_repair', { chained: true, emptyProviders: true }],
+        ['direct from original base period', { chained: false, emptyProviders: false }],
+    ]) {
+        await t.test(label, t => {
+            const f = baseLeadVetoFixture(t, opts), files = snapshot(f.dataDir), before = structuredClone(f.state);
+            const bound = f.bind();
+            assert.equal(bound.id, f.periodId);
+            assert.equal(bound.runtimeId, f.config.runtimeId);
+            assert.equal(bound.riskPeriod, undefined);
+            assert.deepEqual(bound.policy.entryFilter.binanceLeadVeto, ELIGIBLE_BINANCE_LEAD_VETO);
+            assert.equal(eligibleManifestPath(bound), path.join(f.dataDir, f.periodId,
+                'eligible-runtime', 'revisions', bound.runtimeId, 'manifest.json'));
+            assert.deepEqual(snapshot(f.dataDir), files);
+            assert.throws(() => prepareBaseSourceRepair(f.state, bound, 2600), /eligible_source_repair_unproven/);
+
+            const walletProof = { blockNumber: 98040000, blockHash: `0x${'a'.repeat(64)}`, balance: 0 };
+            const next = prepareBaseBinanceLeadVeto(f.state, bound, 2600, { walletProof });
+            assert.deepEqual(f.state, before);
+            assert.deepEqual(snapshot(f.dataDir), files);
+            assert.equal(next.continuousOperation.runtimeId, bound.runtimeId);
+            assert.equal(next.continuousOperationHistory.length, (before.continuousOperationHistory?.length || 0) + 1);
+            assert.equal(next.continuousOperationHistory.at(-1).reasonVerified, 'base_period_binance_lead_veto');
+            assert.equal(next.continuousOperationHistory.at(-1).nextRuntimeId, bound.runtimeId);
+            assert.equal(next.strategyEpochs.length, 2);
+            assert.equal(next.currentStrategyEpochId, next.strategyEpochs[1].id);
+            assert.equal(next.strategyEpochs[1].previousStrategyEpochId, before.currentStrategyEpochId);
+            assert.equal(next.strategyEpochs[1].reason, 'base_period_binance_lead_veto');
+            assert.deepEqual(next.strategyEpochs[1].policy, bound.policy);
+            assert.deepEqual(next.strategyEpochs[1].walletProof, walletProof);
+            assert.equal(next.cash, before.cash);
+            assert.equal(next.maxDrawdown, before.maxDrawdown);
+            assert.equal(next.peakEquity, before.peakEquity);
+            assert.deepEqual(next.completed, before.completed);
+            assert.deepEqual(next.stopHistory, before.stopHistory);
+            assert.equal(initializeContinuousState(bound, next, { now: () => 2700 }), false);
+            assert.equal(initializeEligibleStrategyEpoch(next, bound, 2700), next.strategyEpochs[1]);
+            assert.throws(() => prepareBaseBinanceLeadVeto(next, bound, 2700), /eligible_source_repair_unproven/);
+            f.store.state = next; f.store.save();
+            assert.equal(f.bind().id, f.periodId);
+        });
+    }
+});
+
+test('base_period_binance_lead_veto rejects tampered policies, predecessors, risk namespaces, and non-flat state', async t => {
+    const bindRejections = {
+        'altered lead threshold': f => {
+            f.config.policy = {
+                ...f.config.policy,
+                entryFilter: {
+                    ...f.config.policy.entryFilter,
+                    binanceLeadVeto: { ...ELIGIBLE_BINANCE_LEAD_VETO, thresholdBps: 3 },
+                },
+            };
+            f.config.runtimeId = identity(f.config); f.approval.runtimeId = f.config.runtimeId;
+            f.approval.policyChange.currentPolicySha256 = jsonHash(f.config.policy);
+        },
+        'cap 0.85 manifest': f => {
+            const g = baseLeadVetoFixture(t, { chained: false, cap: '0.85' });
+            assert.throws(g.bind, /eligible_continuation_manifest_mismatch/);
+        },
+        'changed profit recipient': f => {
+            f.config.profitTaking.recipient = `0x${'d'.repeat(40)}`;
+            f.config.runtimeId = identity(f.config); f.approval.runtimeId = f.config.runtimeId;
+        },
+        'unknown approval field': f => { f.approval.clearStop = true; },
+        'wrong policyChange hash': f => { f.approval.policyChange.currentPolicySha256 = 'f'.repeat(64); },
+        'tampered predecessor manifest': f => { fs.appendFileSync(f.previousManifestFile, '\n'); },
+        'altered predecessor continuation': f => {
+            f.approval.entryBinanceLeadVeto.previousContinuation.approvedAt++;
+        },
+        'rehashed predecessor continuation mismatch': f => {
+            f.approval.entryBinanceLeadVeto.previousContinuation.fundingSha256 = 'f'.repeat(64);
+            f.approval.entryBinanceLeadVeto.previousContinuationSha256 = jsonHash(f.approval.entryBinanceLeadVeto.previousContinuation);
+        },
+        'rehashed predecessor approval after current': f => {
+            f.approval.entryBinanceLeadVeto.previousContinuation.approvedAt = f.approval.approvedAt + 1;
+            f.approval.entryBinanceLeadVeto.previousContinuationSha256 = jsonHash(f.approval.entryBinanceLeadVeto.previousContinuation);
+        },
+        'recursive base_period_binance_lead_veto': f => {
+            f.approval.entryBinanceLeadVeto.previousContinuation.reason = 'base_period_binance_lead_veto';
+            f.approval.entryBinanceLeadVeto.previousContinuationSha256 = jsonHash(f.approval.entryBinanceLeadVeto.previousContinuation);
+        },
+        'risk namespace exists': f => fs.mkdirSync(path.join(f.dataDir, 'eligible-risk-periods', f.periodId), { recursive: true }),
+    };
+    for (const [name, mutate] of Object.entries(bindRejections)) await t.test(name, t => {
+        if (name === 'cap 0.85 manifest') return mutate();
+        const f = baseLeadVetoFixture(t, { chained: true });
+        mutate(f); f.saveApproval();
+        assert.throws(f.bind, /eligible_continuation_/);
+    });
+
+    const stateRejections = {
+        'open position': f => { f.state.position = { market: { slug: 'x' } }; f.repin(); },
+        'latched stop': f => { f.state.stopped = { reason: 'operational_check_failed', at: 2400 }; f.repin(); },
+        'non-empty entry holds': f => { f.state.entryHolds = { clock: { retryable: true } }; f.repin(); },
+        'pending provider': f => { f.state.ai.providers.eligible.pending = { id: 'p' }; f.repin(); },
+        'state changed after approval': f => { f.state.events++; },
+    };
+    for (const [name, mutate] of Object.entries(stateRejections)) await t.test(name, t => {
+        const f = baseLeadVetoFixture(t, { chained: true });
+        mutate(f);
+        const bound = f.bind(), before = structuredClone(f.state);
+        assert.throws(() => prepareBaseBinanceLeadVeto(f.state, bound, 2600), /eligible_source_repair_unproven/);
+        assert.deepEqual(f.state, before);
     });
 });

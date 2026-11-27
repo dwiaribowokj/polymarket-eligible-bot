@@ -19,7 +19,8 @@ const clockResponseFailure = error => {
 
 export function temporaryClockFailure(error) {
     const e = safeError(error);
-    return temporary.get(e.code) === e.category
+    return (temporary.get(e.code) === e.category
+        || e.code === 'http_rejected' && e.category === 'api_rejection' && e.httpStatus === 425)
         && (!e.stage || e.stage === 'server_time') && (!e.endpoint || e.endpoint === 'clob');
 }
 
