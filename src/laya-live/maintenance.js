@@ -207,7 +207,8 @@ export class MaintenanceEngine extends Engine {
                 holdings: state.position?.holdings ?? [0, 0], completed: state.completed.filter(row => row.traded).length,
                 stopped: state.stopped, liveRiskStop: state.liveRiskStop || null, entryHolds: state.entryHolds || {},
                 btcFeed: this.client.btcStatus?.() || null });
-        } else this.store.save();
+        } else if (typeof this.store.saveDeferred === 'function') this.store.saveDeferred();
+        else this.store.save();
     }
     async manage(books, now, proof = {}) {
         const state = this.store.state, p = state.position;

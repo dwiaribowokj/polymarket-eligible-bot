@@ -637,3 +637,160 @@ test('base_period_binance_lead_veto rejects tampered policies, predecessors, ris
         assert.deepEqual(f.state, before);
     });
 });
+
+function postLeadVetoRepairFixture(t) {
+    const f = baseLeadVetoFixture(t, { chained: true, emptyProviders: true });
+    const leadBound = f.bind();
+    const nextAfterLead = prepareBaseBinanceLeadVeto(f.state, leadBound, 2600);
+    Object.assign(f.state, nextAfterLead);
+    f.store.save();
+    const leadManifestFile = eligibleManifestPath(leadBound);
+    atomicJson(leadManifestFile, {
+        id: f.periodId,
+        runtimeId: leadBound.runtimeId,
+        policy: leadBound.policy,
+        sources: leadBound.sources,
+        profitTaking: leadBound.profitTaking,
+        startedAt: f.state.startedAt,
+    });
+
+    const repairSources = [['src/store-io.js', digest('store-io')]];
+    const repairCfg = { ...leadBound, runtimeContinuation: undefined, sources: repairSources };
+    delete repairCfg.runtimeContinuation;
+    delete repairCfg.riskRuntimeId;
+    repairCfg.runtimeId = identity(repairCfg);
+    const repairApproval = {
+        schema: 1,
+        runtimeId: repairCfg.runtimeId,
+        originalRuntimeId: f.periodId,
+        periodId: f.periodId,
+        reason: 'base_period_source_repair',
+        originalManifestSha256: digest(fs.readFileSync(f.manifestFile)),
+        fundingSha256: jsonHash(f.state.liveFunding),
+        ledgerStartedAt: f.state.startedAt,
+        wallet,
+        dataDir: f.dataDir,
+        stateSha256: jsonHash(f.state),
+        approvedAt: 2700,
+        sourceRepairMigration: {
+            previousRuntimeId: leadBound.runtimeId,
+            previousManifestSha256: digest(fs.readFileSync(leadManifestFile)),
+            previousContinuation: f.approval,
+            previousContinuationSha256: jsonHash(f.approval),
+        },
+    };
+    const saveRepairApproval = () => atomicJson(f.approvalFile, repairApproval);
+    saveRepairApproval();
+    const repinRepair = () => {
+        f.store.save();
+        repairApproval.stateSha256 = jsonHash(f.state);
+        saveRepairApproval();
+    };
+    return {
+        ...f,
+        leadManifestFile,
+        repairConfig: repairCfg,
+        repairApproval,
+        saveRepairApproval,
+        repinRepair,
+        bindRepair: () => bindRiskPeriod(bindRuntimeContinuation(repairCfg, f.env)),
+    };
+}
+
+test('base_period_source_repair supports chaining after base_period_binance_lead_veto and preserves period state', t => {
+    const f = postLeadVetoRepairFixture(t), before = structuredClone(f.state), files = snapshot(f.dataDir);
+    const bound = f.bindRepair();
+    assert.equal(bound.id, f.periodId);
+    assert.equal(bound.runtimeId, f.repairConfig.runtimeId);
+    assert.deepEqual(bound.policy.entryFilter.binanceLeadVeto, ELIGIBLE_BINANCE_LEAD_VETO);
+    assert.deepEqual(snapshot(f.dataDir), files);
+
+    const next = prepareBaseSourceRepair(f.state, bound, 2800);
+    assert.deepEqual(f.state, before);
+    assert.deepEqual(snapshot(f.dataDir), files);
+    assert.equal(next.continuousOperation.runtimeId, bound.runtimeId);
+    assert.equal(next.continuousOperationHistory.length, 4);
+    assert.equal(next.continuousOperationHistory[2].reasonVerified, 'base_period_binance_lead_veto');
+    assert.equal(next.continuousOperationHistory[3].reasonVerified, 'base_period_source_repair');
+    assert.equal(next.continuousOperationHistory[3].nextRuntimeId, bound.runtimeId);
+    assert.equal(next.currentStrategyEpochId, before.currentStrategyEpochId);
+    assert.deepEqual(next.strategyEpochs, before.strategyEpochs);
+    assert.equal(next.cash, before.cash);
+    assert.equal(next.maxDrawdown, before.maxDrawdown);
+    assert.deepEqual(next.completed, before.completed);
+    assert.deepEqual(next.stopHistory, before.stopHistory);
+    assert.equal(initializeContinuousState(bound, next, { now: () => 2900 }), false);
+    assert.equal(initializeEligibleStrategyEpoch(next, bound, 2900).id, before.currentStrategyEpochId);
+
+    // 5th hop: another base_period_source_repair after the post-lead-veto repair
+    Object.assign(f.state, next);
+    f.store.save();
+    const manifest4 = eligibleManifestPath(bound);
+    atomicJson(manifest4, {
+        id: f.periodId,
+        runtimeId: bound.runtimeId,
+        policy: bound.policy,
+        sources: bound.sources,
+        profitTaking: bound.profitTaking,
+        startedAt: f.state.startedAt,
+    });
+    const hop5Sources = [['src/store-io-2.js', digest('store-io-2')]];
+    const hop5Cfg = { ...bound, runtimeContinuation: undefined, sources: hop5Sources };
+    delete hop5Cfg.runtimeContinuation;
+    delete hop5Cfg.riskRuntimeId;
+    hop5Cfg.runtimeId = identity(hop5Cfg);
+    const hop5Approval = {
+        schema: 1,
+        runtimeId: hop5Cfg.runtimeId,
+        originalRuntimeId: f.periodId,
+        periodId: f.periodId,
+        reason: 'base_period_source_repair',
+        originalManifestSha256: digest(fs.readFileSync(f.manifestFile)),
+        fundingSha256: jsonHash(f.state.liveFunding),
+        ledgerStartedAt: f.state.startedAt,
+        wallet,
+        dataDir: f.dataDir,
+        stateSha256: jsonHash(f.state),
+        approvedAt: 2950,
+        sourceRepairMigration: {
+            previousRuntimeId: bound.runtimeId,
+            previousManifestSha256: digest(fs.readFileSync(manifest4)),
+            previousContinuation: f.repairApproval,
+            previousContinuationSha256: jsonHash(f.repairApproval),
+        },
+    };
+    atomicJson(f.approvalFile, hop5Approval);
+    const hop5Bound = bindRiskPeriod(bindRuntimeContinuation(hop5Cfg, f.env));
+    const afterHop5 = prepareBaseSourceRepair(f.state, hop5Bound, 3000);
+    assert.equal(afterHop5.continuousOperationHistory.length, 5);
+    assert.equal(afterHop5.continuousOperationHistory[2].reasonVerified, 'base_period_binance_lead_veto');
+    assert.equal(afterHop5.continuousOperationHistory[4].reasonVerified, 'base_period_source_repair');
+});
+
+test('post-lead-veto base_period_source_repair rejects altered policy, lineage reason, and direct repair bypass', async t => {
+    await t.test('tampered policy on repair config', t => {
+        const f = postLeadVetoRepairFixture(t);
+        f.repairConfig.policy = { ...f.repairConfig.policy, entryCap: 10 };
+        f.repairConfig.runtimeId = identity(f.repairConfig);
+        f.repairApproval.runtimeId = f.repairConfig.runtimeId;
+        f.saveRepairApproval();
+        assert.throws(f.bindRepair, /eligible_continuation_source_repair_predecessor_mismatch/);
+    });
+    await t.test('tampered predecessor manifest bytes', t => {
+        const f = postLeadVetoRepairFixture(t);
+        fs.appendFileSync(f.leadManifestFile, '\n');
+        assert.throws(f.bindRepair, /eligible_continuation_source_repair_predecessor_changed/);
+    });
+    await t.test('tampered lead-veto lineage reasonVerified', t => {
+        const f = postLeadVetoRepairFixture(t);
+        f.state.continuousOperationHistory[2].reasonVerified = 'base_period_source_repair';
+        f.repinRepair();
+        assert.throws(() => prepareBaseSourceRepair(f.state, f.bindRepair(), 2800), /eligible_source_repair_unproven/);
+    });
+    await t.test('direct repair without migration still requires original manifest policy', t => {
+        const f = postLeadVetoRepairFixture(t);
+        delete f.repairApproval.sourceRepairMigration;
+        f.saveRepairApproval();
+        assert.throws(f.bindRepair, /eligible_continuation_manifest_mismatch/);
+    });
+});

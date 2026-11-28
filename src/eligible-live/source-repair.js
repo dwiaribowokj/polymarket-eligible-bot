@@ -20,24 +20,27 @@ export function verifiedBaseSourceRepair(config) {
         && config.settings.fingerprint === approval.periodId ? approval : null;
 }
 
-function verifyPredecessorLineage(state, approval, firstPrevious = approval.sourceRepairMigration?.previousContinuation) {
+const migrationOf = item => item?.sourceRepairMigration || item?.entryBinanceLeadVeto || null;
+const predecessorOf = item => migrationOf(item)?.previousContinuation || null;
+
+function verifyPredecessorLineage(state, approval, firstPrevious = migrationOf(approval)?.previousContinuation) {
     if (!firstPrevious) {
         if (approval.reason === 'base_period_binance_lead_veto' && state.continuousOperationHistory?.length) fail();
         return;
     }
     const predecessors = [], history = state.continuousOperationHistory || [];
-    for (let previous = firstPrevious; previous;
-        previous = previous.sourceRepairMigration?.previousContinuation) predecessors.unshift(previous);
+    for (let previous = firstPrevious; previous; previous = predecessorOf(previous)) predecessors.unshift(previous);
     if (history.length !== predecessors.length) fail();
     predecessors.forEach((previous, index) => {
         const row = history[index], following = predecessors[index + 1] || approval;
+        const migration = migrationOf(previous);
         if (!Number.isSafeInteger(row?.migratedAt) || row.migratedAt < previous.approvedAt
             || row.migratedAt > following.approvedAt
             || !isDeepStrictEqual(row, { ...state.continuousOperation,
-                runtimeId: previous.sourceRepairMigration?.previousRuntimeId || previous.originalRuntimeId,
+                runtimeId: migration?.previousRuntimeId || previous.originalRuntimeId,
                 migratedAt: row.migratedAt, nextRuntimeId: previous.runtimeId,
-                reasonVerified: 'base_period_source_repair', beforeSha256: previous.stateSha256,
-                previousManifestSha256: previous.sourceRepairMigration?.previousManifestSha256
+                reasonVerified: previous.reason, beforeSha256: previous.stateSha256,
+                previousManifestSha256: migration?.previousManifestSha256
                     || previous.originalManifestSha256 })) fail();
     });
 }

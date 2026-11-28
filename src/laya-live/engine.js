@@ -6,6 +6,7 @@ import { marketSlug, newPosition } from '../restart/strategy.js';
 import { candidateChecks, metadataIdentity, verifyStreamSnapshot, validatedStreamBooks, ShadowEngine } from '../ai-shadow/engine.js';
 import { encodeFeatures } from '../ai-shadow/history.js';
 import { LayaLiveBroker, operationCode } from './broker.js';
+import { compactLiveAiHistory } from './store.js';
 import { OperationalError } from '../restart/network.js';
 import { safeError } from './network.js';
 import { recoverSettlementStop } from './settlement-recovery.js';
@@ -398,6 +399,21 @@ export class LayaLiveEngine extends MaintenanceEngine {
             if (!retryable) this.store.stop('operational_check_failed');
         }
     }
+    maybeArchiveAiHistory(now = Date.now()) {
+        const state = this.store.state;
+        if (this.closed || state.mode !== 'pilot' || state.decisionProvider !== 'eligible'
+            || state.position != null || state.stopped != null || state.liveRiskStop != null
+            || state.frozenAt != null || entryHeld(state) || profitWithdrawalPending(state)
+            || !Number.isSafeInteger(now) || now <= 0
+            || this.lastAiArchiveAt && now - this.lastAiArchiveAt < 3_600_000) return null;
+        if (this.prioritizeFlatEntry(now)) return null;
+        const slot = this.nextFlatEntrySlot(now);
+        if (slot !== null && now >= slot - FLAT_WALLET_AUDIT.slotLeadMs
+            && now <= slot + this.config.ai.slotToleranceMs) return null;
+        this.lastAiArchiveAt = now;
+        try { return compactLiveAiHistory(this.store, { now }); }
+        catch { return null; }
+    }
     async tick(now = Date.now()) {
         this.client.startBtcFeed();
         this.clockCancelledThisTick = false;
@@ -424,6 +440,7 @@ export class LayaLiveEngine extends MaintenanceEngine {
                 this.store.event('settlement_stop_recovery_deferred', { reason: operationCode(error) });
             }
         }
+        this.maybeArchiveAiHistory(Date.now());
         if (this.books.status && now - (this.lastBookStatus || 0) >= 30000) {
             this.lastBookStatus = now;
             this.store.event('laya_book_status', { slug: this.current?.slug ?? null, ...this.books.status(Date.now()) });
@@ -442,7 +459,9 @@ export class LayaLiveEngine extends MaintenanceEngine {
             if (now < at || this.ai.slots[key]) continue;
             const timing = { scheduledAt: at, checkedAt: now, tickAt,
                 tickDelayMs: Math.max(0, now - tickAt), slotLatenessMs: now - at };
-            this.ai.slots[key] = { at: now, status: 'reserved', timing }; this.store.save();
+            this.ai.slots[key] = { at: now, status: 'reserved', timing };
+            if (typeof this.store.saveDeferred === 'function') this.store.saveDeferred();
+            else this.store.save();
             if (now - at > this.config.ai.slotToleranceMs) {
                 this.ai.slots[key].status = 'slot_late';
                 this.store.event('laya_slot_skipped', { key, reason: 'slot_late', timing }); continue;

@@ -97,6 +97,8 @@ export class LiveClockGate {
                 ...(outageAt !== null ? { recoveredAt: after, lastOutageMs: after - outageAt } : {}) };
             clearEntryHold(this.store, 'clock', { now: after, proof: 'fresh_verified_server_time' });
             if (outageAt !== null) this.store.event('live_clock_recovered', { outageMs: after - outageAt });
+            else if (previous?.status === 'verified' && !this.store.state.stopped
+                && typeof this.store.saveDeferred === 'function') this.store.saveDeferred();
             else this.store.save();
             return true;
         } catch (error) {

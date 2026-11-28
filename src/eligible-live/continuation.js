@@ -379,7 +379,8 @@ function validateBaseSourceRepair(config, approval, depth, sourceRepairRuntimes)
     const manifest = parse(bytes);
     if (manifest.id !== approval.periodId || manifest.startedAt !== approval.ledgerStartedAt
         || manifest.runtimeId != null && manifest.runtimeId !== approval.originalRuntimeId
-        || !validSources(manifest.sources) || !isDeepStrictEqual(manifest.policy, config.policy)
+        || !validSources(manifest.sources)
+        || (!Object.hasOwn(approval, 'sourceRepairMigration') && !isDeepStrictEqual(manifest.policy, config.policy))
         || !isDeepStrictEqual(manifest.profitTaking, config.profitTaking)
         || jsonHash({ policy: manifest.policy, sources: manifest.sources,
             profitTaking: manifest.profitTaking }).slice(0, 16) !== approval.originalRuntimeId)
@@ -388,11 +389,12 @@ function validateBaseSourceRepair(config, approval, depth, sourceRepairRuntimes)
         const migration = approval.sourceRepairMigration, previous = migration?.previousContinuation;
         const migrationKeys = ['previousRuntimeId', 'previousManifestSha256',
             'previousContinuation', 'previousContinuationSha256'];
-        const unchanged = ['schema', 'originalRuntimeId', 'periodId', 'reason',
+        const unchanged = ['schema', 'originalRuntimeId', 'periodId',
             'originalManifestSha256', 'fundingSha256', 'ledgerStartedAt', 'wallet', 'dataDir'];
         if (!record(migration) || Object.keys(migration).length !== migrationKeys.length
             || migrationKeys.some(key => !Object.hasOwn(migration, key)) || !record(previous)
             || !ID.test(migration.previousRuntimeId) || previous.runtimeId !== migration.previousRuntimeId
+            || !['base_period_source_repair', 'base_period_binance_lead_veto'].includes(previous.reason)
             || !HASH.test(migration.previousManifestSha256) || !HASH.test(migration.previousContinuationSha256)
             || jsonHash(previous) !== migration.previousContinuationSha256
             || unchanged.some(key => previous[key] !== approval[key])
@@ -411,7 +413,8 @@ function validateBaseSourceRepair(config, approval, depth, sourceRepairRuntimes)
                 profitTaking: previousManifest.profitTaking }).slice(0, 16) !== previous.runtimeId)
             fail('source_repair_predecessor_mismatch');
         validateContinuation({ ...config, runtimeId: previous.runtimeId,
-            sources: previousManifest.sources }, previous, depth + 1, visited);
+            policy: previousManifest.policy, sources: previousManifest.sources,
+            profitTaking: previousManifest.profitTaking }, previous, depth + 1, visited);
     }
     const ledger = parse(readArtifact(dataDir, approval.periodId, 'pilot', 'late-entry.json'));
     if (ledger.baseline !== approval.periodId || ledger.mode !== 'pilot' || ledger.strategy !== 'late-entry'
